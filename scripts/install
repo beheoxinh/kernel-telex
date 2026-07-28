@@ -1,0 +1,19 @@
+engine_name="ktelex"
+pkg_name="ibus-${engine_name}"
+ibus_e_name="ibus-engine-${engine_name}"
+engine_gui_name="ibus-setup-KTelex.desktop"
+
+PREFIX="${1:-/usr}"
+DESTDIR="${2:-}"
+
+engine_dir="${DESTDIR}${PREFIX}/share/${pkg_name}"
+ibus_lib_dir="${DESTDIR}${PREFIX}/libexec"
+ibus_component_dir="${DESTDIR}${PREFIX}/share/ibus/component"
+apps_dir="${DESTDIR}${PREFIX}/share/applications"
+
+mkdir -p "${engine_dir}" "${ibus_lib_dir}" "${ibus_component_dir}" "${apps_dir}"
+
+cp -R -f icons data "${engine_dir}"
+cp -f "${ibus_e_name}" "${ibus_lib_dir}/"
+cp -f "data/${engine_name}.xml" "${ibus_component_dir}/"
+[ -f "data/${engine_gui_name}" ] && cp -f "data/${engine_gui_name}" "${apps_dir}/"

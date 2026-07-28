@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component>
+  <name>org.freedesktop.IBus.ktelex</name>
+  <description>KTelex Component</description>
+  <exec>/usr/libexec/ibus-engine-ktelex --ibus</exec>
+  <version>1.0.2</version>
+  <author>Luong Thanh Lam &lt;ltlam93@gmail.com&gt;</author>
+  <license>GPL</license>
+  <homepage>https://github.com/BambooEngine/ibus-bamboo</homepage>
+  <textdomain>ibus-ktelex</textdomain>
+  <engines>
+    <engine>
+      <name>KTelex</name>
+      <longname>KTelex</longname>
+      <description>Vietnamese Input Method</description>
+      <language>vi</language>
+      <license>GPL</license>
+      <author>Luong Thanh Lam &lt;ltlam93@gmail.com&gt;</author>
+      <icon>/usr/share/ktelex/icons/vi.svg</icon>
+      <layout>default</layout>
+      <symbol>VI</symbol>
+      <rank>0</rank>
+    </engine>
+    <engine>
+      <name>KtelexUs</name>
+      <longname>KTelex</longname>
+      <description>English Input Method (US)</description>
+      <language>en_US</language>
+      <license>GPL</license>
+      <author>Luong Thanh Lam &lt;ltlam93@gmail.com&gt;</author>
+      <icon>/usr/share/ktelex/icons/us.svg</icon>
+      <layout>us</layout>
+      <symbol>EN</symbol>
+      <rank>0</rank>
+    </engine>
+    <engine>
+      <name>KtelexGb</name>
+      <longname>KTelex</longname>
+      <description>English Input Method (UK)</description>
+      <language>en_GB</language>
+      <license>GPL</license>
+      <author>Luong Thanh Lam &lt;ltlam93@gmail.com&gt;</author>
+      <icon>/usr/share/ktelex/icons/us.svg</icon>
+      <layout>gb</layout>
+      <symbol>EN</symbol>
+      <rank>0</rank>
+    </engine>
+  </engines>
+</component>

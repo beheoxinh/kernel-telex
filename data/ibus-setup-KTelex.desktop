@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=IBus-KTelex Setup
+Type=Application
+Exec=/usr/lib/ktelex/ibus-engine-ktelex -gui
+Icon=/usr/share/ktelex/icons/vi.svg
+NoDisplay=true
+StartupNotify=true
