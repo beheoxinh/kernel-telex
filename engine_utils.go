@@ -54,11 +54,11 @@ func GetIBusEngineCreator() func(*dbus.Conn, string) dbus.ObjectPath {
 			cfg.InputMethod = bamboo.DefaultInputMethodName
 		}
 		baseEngine := ibus.BaseEngine(conn, objectPath)
-		var engine = NewIbusBambooEngine(engineName, config.LoadConfig(engineName), &baseEngine, bamboo.NewEngine(inputMethod, cfg.Flags))
+		var engine = NewIbusBambooEngine(engineName, cfg, &baseEngine, bamboo.NewEngine(inputMethod, cfg.Flags))
 		engine.propList = GetPropListByConfig(cfg)
 		engine.shouldEnqueuKeyStrokes = true
 		ibus.PublishEngine(conn, objectPath, engine)
-		go engine.init()
+		engine.init()
 
 		return objectPath
 	}

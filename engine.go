@@ -223,6 +223,7 @@ func (e *Engine) Reset() *dbus.Error {
 
 func (e *Engine) Enable() *dbus.Error {
 	fmt.Print("Enable.\n")
+	e.preeditor.Reset()
 	e.RequireSurroundingText()
 	return nil
 }
