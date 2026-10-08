@@ -255,6 +255,64 @@ func TestUinputAppMatrixFocusOut(t *testing.T) {
 	}
 }
 
+// TestUinputAppMatrixFocusFlap: Chromium/Electron triggers transient FocusOut/FocusIn
+// flap during typing. The preeditor buffer and syllable composition must NOT be wiped.
+func TestUinputAppMatrixFocusFlap(t *testing.T) {
+	a := newAppModel(t)
+	// Type "tiee" -> transforms to "tiê"
+	a.typeKey('t')
+	a.typeKey('i')
+	a.typeKey('e')
+	a.typeKey('e')
+	// Simulate BS echo arrives
+	a.typeKey(IBusBackSpace)
+	pollCommitText(t, a.fe, "ê", 500*time.Millisecond)
+
+	// Simulate Chromium transient FocusOut followed by FocusIn
+	a.e.FocusOut()
+	a.e.FocusIn()
+
+	// Continue typing "ngs" -> should form "tiếng", NOT "ngs" or "tiêngs"
+	a.typeKey('n')
+	a.typeKey('g')
+	a.typeKey('s')
+	a.typeKey(IBusBackSpace)
+	a.typeKey(IBusBackSpace)
+	a.typeKey(IBusBackSpace)
+	a.awaitIdle(time.Second)
+
+	// In the app model, BS from uinput transforms would delete corresponding chars in a real app,
+	// but here we check that the preeditor successfully formed "tiếng" without syllable split:
+	gotPreedit := a.e.uinputPreeditString()
+	if gotPreedit != "tiếng" {
+		t.Errorf("focus flap typing preedit=%q, want %q", gotPreedit, "tiếng")
+	}
+}
+
+// TestUinputAppMatrixWmNormalization: alternating between "instance:class" and "class"
+// (e.g. "thorium-browser:Thorium-browser" and "Thorium-browser") must not reset preeditor.
+func TestUinputAppMatrixWmNormalization(t *testing.T) {
+	a := newAppModel(t)
+	a.e.wmClasses = "thorium-browser:Thorium-browser"
+	a.typeKey('t')
+	a.typeKey('i')
+	a.typeKey('e')
+
+	// FocusIn with different format of the SAME window
+	a.e.checkWmClass("Thorium-browser")
+
+	a.typeKey('e') // triggers "tiê"
+	a.typeKey(IBusBackSpace)
+	pollCommitText(t, a.fe, "ê", 500*time.Millisecond)
+
+	a.fe.mu.Lock()
+	got := a.fe.commitText
+	a.fe.mu.Unlock()
+	if got != "ê" {
+		t.Errorf("wm normalization typing: commitText=%q, want %q", got, "ê")
+	}
+}
+
 // TestUinputAppMatrixWmChange: switching apps with an open tx ends it
 // through the single tx-end path; the next key starts clean.
 func TestUinputAppMatrixWmChange(t *testing.T) {

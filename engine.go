@@ -193,25 +193,13 @@ func (e *Engine) FocusIn() *dbus.Error {
 func (e *Engine) FocusOut() *dbus.Error {
 	log.Print("FocusOut.")
 	if e.checkInputMode(config.UinputIM) {
-		e.Lock()
-		if e.uinputCommitTimer_ != nil {
-			e.uinputCommitTimer_.Stop()
-			e.uinputCommitTimer_ = nil
-		}
-		if e.uinputCommitTimer_ != nil {
-			e.uinputCommitTimer_.Stop()
-			e.uinputCommitTimer_ = nil
-		}
-		if e.uinputDeleting_ || e.uinputPendingCommit_ != "" {
-			// T8: flush via the single tx-end path so deferred keys are
-			// replayed, never dropped; EWMA untouched (no latency sample).
-			txID := e.uinputTxID_
-			e.uinputEndTxLocked(txID, "focusout")
-		}
-		e.uinputNoEcho_ = false
-		e.uinputLastWm_ = ""
-		e.preeditor.Reset()
-		e.Unlock()
+		// In UinputIM, browsers (Thorium, Chromium, Electron) frequently flap FocusOut/FocusIn
+		// on Backspace injection and DOM edits.
+		// We do NOT reset preeditor or wipe uinputLastWm_ here because doing so splits syllables
+		// mid-word (e.g. "tiê" -> reset -> "ngs" -> "tiêngs").
+		// If the user actually switches apps, the switch is caught by checkWmClass/uinputProcessKeyEvent
+		// or FocusIn on the new window.
+		// If a transaction is actively deleting or pending commit, we let the timer/echo complete normally.
 		return nil
 	}
 	e.resetPreedit()

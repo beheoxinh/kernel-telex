@@ -130,6 +130,20 @@ var sleep = func() {
 	}
 }
 
+func normalizeWmClass(wm string) string {
+	parts := strings.Split(wm, ":")
+	if len(parts) >= 2 && parts[1] != "" {
+		return strings.ToLower(parts[1])
+	}
+	return strings.ToLower(wm)
+}
+
+func isSameWmClass(a, b string) bool {
+	na := normalizeWmClass(a)
+	nb := normalizeWmClass(b)
+	return na != "" && nb != "" && na == nb
+}
+
 func (e *Engine) resetBuffer() {
 	if e.getRawKeyLen() == 0 {
 		return
@@ -142,7 +156,10 @@ func (e *Engine) resetBuffer() {
 }
 
 func (e *Engine) checkWmClass(newId string) {
-	if newId == "" || e.wmClasses == newId {
+	if newId == "" || isSameWmClass(e.wmClasses, newId) {
+		if newId != "" {
+			e.wmClasses = newId
+		}
 		return
 	}
 	e.wmClasses = newId
@@ -262,10 +279,21 @@ func migrateInputMode(im int) int {
 func (e *Engine) getInputMode() int {
 	var im int
 	if e.respectAppMapping && e.getWmClass() != "" {
-		if stored, ok := e.config.InputModeMapping[e.getWmClass()]; ok {
+		wm := e.getWmClass()
+		if stored, ok := e.config.InputModeMapping[wm]; ok {
 			im = migrateInputMode(stored)
 			if _, ok := config.ImLookupTable[im]; ok {
 				return im
+			}
+		}
+		// Fallback to normalized lookup if exact match not found
+		norm := normalizeWmClass(wm)
+		for mappedApp, mappedMode := range e.config.InputModeMapping {
+			if normalizeWmClass(mappedApp) == norm {
+				im = migrateInputMode(mappedMode)
+				if _, ok := config.ImLookupTable[im]; ok {
+					return im
+				}
 			}
 		}
 	}

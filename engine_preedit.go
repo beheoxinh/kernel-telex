@@ -241,11 +241,11 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 	// If FocusOut reset preedit state, track which app "owns" the preedit.
 	// T9: a wm change also ends any half-open tx through the single tx-end
 	// path (commit + replay), so no keystroke is lost across app switches.
-	if e.uinputPreeditString() != "" && wm != e.uinputLastWm_ {
+	if e.uinputPreeditString() != "" && e.uinputLastWm_ != "" && wm != "" && !isSameWmClass(wm, e.uinputLastWm_) {
 		log.Printf("[uinputIM] app change: old=%s new=%s, reset preedit", e.uinputLastWm_, wm)
 		e.preeditor.Reset()
 	}
-	if wm != e.uinputLastWm_ && (e.uinputDeleting_ || e.uinputPendingCommit_ != "") {
+	if e.uinputLastWm_ != "" && wm != "" && !isSameWmClass(wm, e.uinputLastWm_) && (e.uinputDeleting_ || e.uinputPendingCommit_ != "") {
 		log.Printf("[uinputIM] wm change with open tx: end tx before switch")
 		if e.uinputCommitTimer_ != nil {
 			e.uinputCommitTimer_.Stop()
