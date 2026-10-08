@@ -65,9 +65,10 @@ type Engine struct {
 	uinputCommitTimer_      *time.Timer // async commit timer (skey-style)
 	uinputBsSentAt_         time.Time // when BS was sent via uinput (for EWMA)
 	uinputBsRtEwmaUsec_     int64     // EWMA of BS round-trip in µs
-	uinputPassthroughUntil_ time.Time // forward all keys while uinput server types
-	uinputNoEcho_           bool     // true: current app doesn't echo BS through IBus
-	uinputLastWm_           string   // wmClass that "owns" the current preedit
+	uinputNoEcho_           bool      // true: current app doesn't echo BS through IBus
+	uinputLastWm_           string    // wmClass that "owns" the current preedit
+	uinputTxID_             uint64    // generation counter for the active transaction
+	uinputTxEndAt_          time.Time // when the last transaction ended (stray-BS guard window)
 	emoji                  *EmojiEngine
 	isSurroundingTextReady bool
 	lastKeyWithShift       bool
@@ -148,6 +149,17 @@ func (e *Engine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (b
 }
 
 func (e *Engine) FocusIn() *dbus.Error {
+	// T9: a fresh focus never inherits a half-open tx — end it first so a
+	// stale fallback timer cannot commit into the new context.
+	e.Lock()
+	if e.checkInputMode(config.UinputIM) && (e.uinputDeleting_ || e.uinputPendingCommit_ != "") {
+		if e.uinputCommitTimer_ != nil {
+			e.uinputCommitTimer_.Stop()
+			e.uinputCommitTimer_ = nil
+		}
+		e.uinputEndTxLocked(e.uinputTxID_, "focusin")
+	}
+	e.Unlock()
 	var latestWm = e.getLatestWmClass()
 	log.Printf("FocusIn: %s (IBflags=%d bit21=%d)", latestWm, e.config.IBflags, (e.config.IBflags>>21)&1)
 	e.checkWmClass(latestWm)
@@ -186,26 +198,19 @@ func (e *Engine) FocusOut() *dbus.Error {
 			e.uinputCommitTimer_.Stop()
 			e.uinputCommitTimer_ = nil
 		}
-		if e.uinputPendingCommit_ != "" {
-			text := e.uinputPendingCommit_
-			e.uinputPendingCommit_ = ""
-			e.Unlock()
-			e.commitText(text)
-			e.resetPreedit()
-		} else {
-			e.Unlock()
-			e.resetPreedit()
+		if e.uinputCommitTimer_ != nil {
+			e.uinputCommitTimer_.Stop()
+			e.uinputCommitTimer_ = nil
 		}
-		e.Lock()
-		e.uinputExpectingBs_ = 0
-		e.uinputSeenBs_ = 0
-		e.uinputDeleting_ = false
-		e.uinputDeferredKeys_ = nil
-		e.uinputDeferredCodes_ = nil
-		e.uinputDeferredStates_ = nil
-		e.uinputPassthroughUntil_ = time.Time{}
+		if e.uinputDeleting_ || e.uinputPendingCommit_ != "" {
+			// T8: flush via the single tx-end path so deferred keys are
+			// replayed, never dropped; EWMA untouched (no latency sample).
+			txID := e.uinputTxID_
+			e.uinputEndTxLocked(txID, "focusout")
+		}
 		e.uinputNoEcho_ = false
 		e.uinputLastWm_ = ""
+		e.preeditor.Reset()
 		e.Unlock()
 		return nil
 	}
@@ -242,7 +247,6 @@ func (e *Engine) Disable() *dbus.Error {
 	e.uinputDeferredKeys_ = nil
 	e.uinputDeferredCodes_ = nil
 	e.uinputDeferredStates_ = nil
-	e.uinputPassthroughUntil_ = time.Time{}
 	e.uinputNoEcho_ = false
 	e.Unlock()
 	e.preeditor.Reset()

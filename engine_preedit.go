@@ -96,7 +96,7 @@ func (e *Engine) uinputReplayBuffered() {
 	keys := e.uinputDeferredKeys_
 	codes := e.uinputDeferredCodes_
 	states := e.uinputDeferredStates_
-	e.uinputDeferredKeys_ = nil
+	e.uinputDeferredKeys_ = nil // T8: snapshot+clear, replay below
 	e.uinputDeferredCodes_ = nil
 	e.uinputDeferredStates_ = nil
 	for i := range keys {
@@ -106,31 +106,76 @@ func (e *Engine) uinputReplayBuffered() {
 	}
 }
 
+// updateUinputEwma folds a measured BS-echo round trip into the EWMA.
+// Latency signal only: commit timing always goes through uinputTxTimeout.
+func (e *Engine) updateUinputEwma(rt time.Duration) {
+	rtUsec := rt.Microseconds()
+	if e.uinputBsRtEwmaUsec_ <= 0 || e.uinputBsRtEwmaUsec_ == kUinputInitUsec {
+		e.uinputBsRtEwmaUsec_ = rtUsec
+	} else {
+		e.uinputBsRtEwmaUsec_ = int64(kUinputEwmaAlpha*float64(rtUsec) + (1.0-kUinputEwmaAlpha)*float64(e.uinputBsRtEwmaUsec_))
+	}
+}
+
 // EWMA constants for adaptive commit delay (mirrors skey's kBsRtEwmaAlpha etc.)
 const (
 	kUinputEwmaAlpha      = 0.5
-	kUinputMinUsec        = 10000 // 10ms minimum
 	kUinputInitUsec       = 15000 // 15ms initial EWMA seed
-	kUinputMultiplier     = 1.0
-	kUinputAddrBarUsec    = 25000 // 25ms for address bar
 	kUinputStaleTimeout   = 300 * time.Millisecond // watchdog: reset stuck state
-	kUinputFixedCommitMs  = 20                      // fixed delay for uinput BS → commit
+	kUinputTxMinUsec      = 20000                   // 20ms lower bound for tx commit timeout
+	kUinputTxMaxUsec      = 80000                   // 80ms upper bound for tx commit timeout
+	kUinputStrayBsGuard   = 150 * time.Millisecond  // swallow post-commit BS echoes within this window
 )
 
-// computeUinputCommitDelay calculates adaptive delay using EWMA of measured
-// round-trip times (bsSentAt → last BS echo received).
-func computeUinputCommitDelay(rt time.Duration, ewma *int64) time.Duration {
-	rtUsec := rt.Microseconds()
-	if *ewma <= 0 || *ewma == kUinputInitUsec {
-		*ewma = rtUsec
-	} else {
-		*ewma = int64(kUinputEwmaAlpha*float64(rtUsec) + (1.0-kUinputEwmaAlpha)*float64(*ewma))
+// uinputTxTimeout bounds the tx commit wait from the EWMA of measured
+// BS-echo round trips: clamp(ewma, 20ms, 80ms). Echo is an accelerator,
+// never a gatekeeper: the timer armed at BS-send fires even on zero echo.
+func uinputTxTimeout(ewmaUsec int64) time.Duration {
+	if ewmaUsec < kUinputTxMinUsec {
+		ewmaUsec = kUinputTxMinUsec
 	}
-	delayUsec := *ewma
-	if delayUsec < kUinputMinUsec {
-		delayUsec = kUinputMinUsec
+	if ewmaUsec > kUinputTxMaxUsec {
+		ewmaUsec = kUinputTxMaxUsec
 	}
-	return time.Duration(delayUsec) * time.Microsecond
+	return time.Duration(ewmaUsec) * time.Microsecond
+}
+
+// uinputEndTxLocked finishes the active transaction: stops the fallback
+// timer, clears delete state, records the stray-BS guard timestamp,
+// commits the replacement text via IBus CommitText, and replays every
+// deferred key. Call with e.Mutex held; releases it around I/O.
+func (e *Engine) uinputEndTxLocked(txID uint64, reason string) {
+	if e.uinputTxID_ != txID {
+		return
+	}
+	if e.uinputCommitTimer_ != nil {
+		e.uinputCommitTimer_.Stop()
+		e.uinputCommitTimer_ = nil
+	}
+	cText := e.uinputPendingCommit_
+	e.uinputPendingCommit_ = ""
+	e.uinputDeleting_ = false
+	e.uinputExpectingBs_ = 0
+	e.uinputSeenBs_ = 0
+	keys := e.uinputDeferredKeys_
+	codes := e.uinputDeferredCodes_
+	states := e.uinputDeferredStates_
+	e.uinputDeferredKeys_ = nil
+	e.uinputDeferredCodes_ = nil
+	e.uinputDeferredStates_ = nil
+	e.uinputTxEndAt_ = time.Now()
+	e.uinputNoEcho_ = false
+	e.Unlock()
+	log.Printf("[uinputIM] tx end (%s): commit %q, replay %d keys", reason, cText, len(keys))
+	if cText != "" {
+		e.commitText(cText)
+	}
+	for i := range keys {
+		log.Printf("[uinputIM] replay buffered key 0x%04x", keys[i])
+		e.ForwardKeyEvent(keys[i], codes[i], states[i])
+		e.ForwardKeyEvent(keys[i], codes[i], states[i]|IBusReleaseMask)
+	}
+	e.Lock()
 }
 
 // uinputProcessKeyEvent handles UinputIM on Wayland.
@@ -150,11 +195,27 @@ func computeUinputCommitDelay(rt time.Duration, ewma *int64) time.Duration {
 //   - Backspace from user: update engine state, forward raw BS to app.
 //   - Commit delay uses EWMA of measured round-trip times (adaptive).
 func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (bool, *dbus.Error) {
+	// T5 race fix: the tx timer goroutine touches uinputDeleting_/SeenBs/
+	// ExpectingBs under e.Mutex. The keyevent path must hold the same mutex
+	// for every tx-state access, otherwise `go test -race` fires. All
+	// callees (preeditor, commitText, uinputBackspace, getWmClass, …) are
+	// lock-free (audited), and uinputEndTxLocked releases the mutex around
+	// its D-Bus/evdev I/O, so holding it here cannot deadlock.
+	e.Lock()
+	defer e.Unlock()
 	var keyRune = rune(keyVal)
 
-	// Log ghost BackSpace events while engine is idle
-	if keyVal == IBusBackSpace && !e.uinputDeleting_ && e.uinputExpectingBs_ == 0 {
-		log.Printf("[uinputIM] GHOST BS while idle! keyCode=0x%04x state=0x%04x", keyCode, state)
+	// Echo guard (T6): a BS loopback arriving after the transaction ended
+	// is a stray echo, not a user keystroke — swallow it so the just
+	// committed text is never deleted.
+	if keyVal == IBusBackSpace && !e.uinputDeleting_ {
+		if !e.uinputTxEndAt_.IsZero() && time.Since(e.uinputTxEndAt_) < kUinputStrayBsGuard {
+			log.Printf("[uinputIM] stray BS echo after tx end: swallow (guard %v)", kUinputStrayBsGuard)
+			return true, nil
+		}
+		if e.uinputExpectingBs_ == 0 {
+			log.Printf("[uinputIM] GHOST BS while idle! keyCode=0x%04x state=0x%04x", keyCode, state)
+		}
 	}
 
 	// Debug: log ALL printable key events along with preedit state
@@ -163,10 +224,20 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		log.Printf("[uinputIM] key=%c preedit=%q wm=%s", keyRune, e.uinputPreeditString(), wm)
 	}
 
-	// If FocusOut reset preedit state, track which app "owns" the preedit
+	// If FocusOut reset preedit state, track which app "owns" the preedit.
+	// T9: a wm change also ends any half-open tx through the single tx-end
+	// path (commit + replay), so no keystroke is lost across app switches.
 	if e.uinputPreeditString() != "" && wm != e.uinputLastWm_ {
 		log.Printf("[uinputIM] app change: old=%s new=%s, reset preedit", e.uinputLastWm_, wm)
 		e.preeditor.Reset()
+	}
+	if wm != e.uinputLastWm_ && (e.uinputDeleting_ || e.uinputPendingCommit_ != "") {
+		log.Printf("[uinputIM] wm change with open tx: end tx before switch")
+		if e.uinputCommitTimer_ != nil {
+			e.uinputCommitTimer_.Stop()
+			e.uinputCommitTimer_ = nil
+		}
+		e.uinputEndTxLocked(e.uinputTxID_, "wm-change")
 	}
 	e.uinputLastWm_ = wm
 
@@ -184,95 +255,33 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 	// BS echoes are FORWARDED so the app receives its BackSpace events.
 	// Non-BS keys are BUFFERED and replayed after commit.
 	if e.uinputDeleting_ {
-		// Watchdog: if BS echoes stall (lost/merged by compositor, or
-		// app doesn't route evdev through IBus like Chromium Wayland),
-		// force-reset after timeout to prevent permanently stuck state.
+		// T9: the independent tx timer owns the commit; a next key only
+		// refreshes the watchdog reference, never force-commits here.
 		if e.uinputExpectingBs_ > 0 && time.Since(e.uinputBsSentAt_) > kUinputStaleTimeout {
-			if !e.uinputNoEcho_ {
-				e.uinputNoEcho_ = true
-				e.uinputBsRtEwmaUsec_ = kUinputInitUsec
-				log.Printf("[uinputIM] WATCHDOG: app '%s' doesn't echo BS (seen=%d expect=%d)",
-					e.getWmClass(), e.uinputSeenBs_, e.uinputExpectingBs_)
-			}
-			e.uinputExpectingBs_ = 0
-			e.uinputSeenBs_ = 0
-			e.uinputDeleting_ = false
-			forceText := e.uinputPendingCommit_
-			e.uinputPendingCommit_ = ""
-			if forceText != "" {
-				e.commitText(forceText)
-			}
-			e.uinputDeferredKeys_ = nil
-			e.uinputDeferredCodes_ = nil
-			e.uinputDeferredStates_ = nil
-		} else if e.uinputNoEcho_ {
-			// No-echo app — flush commit, forward key.
-			if e.uinputPendingCommit_ != "" {
-				e.commitText(e.uinputPendingCommit_)
-				e.uinputPendingCommit_ = ""
-			}
-			e.uinputDeleting_ = false
-			e.uinputExpectingBs_ = 0
-			e.uinputSeenBs_ = 0
-			e.uinputDeferredKeys_ = nil
-			e.uinputDeferredCodes_ = nil
-			e.uinputDeferredStates_ = nil
-		} else if keyVal == IBusBackSpace {
+			log.Printf("[uinputIM] WATCHDOG: no echo progress (seen=%d expect=%d), tx timer owns commit",
+				e.uinputSeenBs_, e.uinputExpectingBs_)
+		}
+		if keyVal == IBusBackSpace {
 			e.uinputSeenBs_++
 			log.Printf("[uinputIM] BS echo %d/%d (forward)", e.uinputSeenBs_, e.uinputExpectingBs_)
 			if e.uinputSeenBs_ >= e.uinputExpectingBs_ {
-				if e.uinputNoEcho_ {
-					e.uinputNoEcho_ = false
-					log.Printf("[uinputIM] BS echoes arrived, noEcho=false (recovered)")
-				}
 				rt := time.Since(e.uinputBsSentAt_)
-				delay := computeUinputCommitDelay(rt, &e.uinputBsRtEwmaUsec_)
-				e.uinputExpectingBs_ = 0
-				e.uinputSeenBs_ = 0
-				cText := e.uinputPendingCommit_
-				e.uinputPendingCommit_ = ""
-				bufKeys := e.uinputDeferredKeys_
-				bufCodes := e.uinputDeferredCodes_
-				bufStates := e.uinputDeferredStates_
-				e.uinputDeferredKeys_ = nil
-				e.uinputDeferredCodes_ = nil
-				e.uinputDeferredStates_ = nil
-				if e.uinputCommitTimer_ != nil {
-					e.uinputCommitTimer_.Stop()
-				}
-				log.Printf("[uinputIM] all BS done, RT=%v, commit %q in %v", rt, cText, delay)
-				e.uinputCommitTimer_ = time.AfterFunc(delay, func() {
-					e.Lock()
-					if !e.uinputDeleting_ {
-						e.Unlock()
-						return
-					}
-					e.uinputDeleting_ = false
-					e.Unlock()
-					if cText != "" {
-						log.Printf("[uinputIM] timer commit: %q", cText)
-						e.commitText(cText)
-					}
-					for i := range bufKeys {
-						log.Printf("[uinputIM] replay buffered key 0x%04x", bufKeys[i])
-						e.ForwardKeyEvent(bufKeys[i], bufCodes[i], bufStates[i])
-						e.ForwardKeyEvent(bufKeys[i], bufCodes[i], bufStates[i]|IBusReleaseMask)
-					}
-				})
+				e.updateUinputEwma(rt)
+				txID := e.uinputTxID_
+				e.uinputEndTxLocked(txID, "all-echo")
 			}
 			return false, nil
-		} else {
-			if keyVal >= 0xffe1 && keyVal <= 0xfff0 {
-				return false, nil
-			}
-			if len(e.uinputDeferredKeys_) < 32 {
-				log.Printf("[uinputIM] buffer key 0x%04x during uinput delete", keyVal)
-				e.uinputDeferredKeys_ = append(e.uinputDeferredKeys_, keyVal)
-				e.uinputDeferredCodes_ = append(e.uinputDeferredCodes_, keyCode)
-				e.uinputDeferredStates_ = append(e.uinputDeferredStates_, state)
-			}
-			return true, nil
 		}
+		if keyVal >= 0xffe1 && keyVal <= 0xfff0 {
+			return false, nil
+		}
+		if len(e.uinputDeferredKeys_) < 32 {
+			log.Printf("[uinputIM] buffer key 0x%04x during uinput delete", keyVal)
+			e.uinputDeferredKeys_ = append(e.uinputDeferredKeys_, keyVal)
+			e.uinputDeferredCodes_ = append(e.uinputDeferredCodes_, keyCode)
+			e.uinputDeferredStates_ = append(e.uinputDeferredStates_, state)
+		}
+		return true, nil
 	}
 
 	// ── Forward Ctrl/Alt+letter raw to the app ──
@@ -289,6 +298,8 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 	}
 
 	// ── Handle user backspace ──
+	// (T6: stray post-commit echoes are already swallowed above; a BS that
+	// reaches here outside the guard window is a genuine user keystroke.)
 	if keyVal == IBusBackSpace {
 		if e.getRawKeyLen() > 0 {
 			e.preeditor.RemoveLastChar(true)
@@ -362,29 +373,36 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		oldText, keyS, afterText, pfxRunes, deleteLen, addPart)
 
 	if deleteLen > 0 {
-		if e.uinputNoEcho_ {
-			log.Printf("[uinputIM] no-echo: FwdKey BS=%d + type %q", deleteLen, addPart)
-			for i := 0; i < deleteLen; i++ {
-				e.ForwardKeyEvent(IBusBackSpace, 0, 0)
-				e.ForwardKeyEvent(IBusBackSpace, 0, IBusReleaseMask)
-			}
-			for _, r := range addPart {
-				keyVal := uint32(r)
-				if keyVal > 0xFF {
-					keyVal = 0x01000000 + keyVal
-				}
-				e.ForwardKeyEvent(keyVal, 0, 0)
-				e.ForwardKeyEvent(keyVal, 0, IBusReleaseMask)
-			}
-		} else {
-			log.Printf("[uinputIM] uinput BS=%d, pending commit=%q", deleteLen, addPart)
-			e.uinputBsSentAt_ = time.Now()
-			e.uinputExpectingBs_ = deleteLen
-			e.uinputSeenBs_ = 0
-			e.uinputPendingCommit_ = addPart
-			e.uinputDeleting_ = true
-			uinputBackspace(deleteLen)
+		// T7: ALL transforms go through evdev BS + IBus CommitText. The
+		// old uinputNoEcho_ ForwardKeyEvent(0x01000000+r) path is removed:
+		// Chromium Wayland drops layout-less Unicode keysyms while
+		// CommitText lands via text-input commit-string on every client.
+		log.Printf("[uinputIM] tx start: uinput BS=%d, pending commit=%q", deleteLen, addPart)
+		e.uinputBsSentAt_ = time.Now()
+		e.uinputExpectingBs_ = deleteLen
+		e.uinputSeenBs_ = 0
+		e.uinputPendingCommit_ = addPart
+		e.uinputDeleting_ = true
+		e.uinputNoEcho_ = false
+		e.uinputTxID_++
+		txID := e.uinputTxID_
+		if e.uinputCommitTimer_ != nil {
+			e.uinputCommitTimer_.Stop()
 		}
+		timeout := uinputTxTimeout(e.uinputBsRtEwmaUsec_)
+		log.Printf("[uinputIM] tx %d armed: fallback commit in %v", txID, timeout)
+		e.uinputCommitTimer_ = time.AfterFunc(timeout, func() {
+			e.Lock()
+			defer e.Unlock()
+			if e.uinputTxID_ != txID || !e.uinputDeleting_ {
+				return
+			}
+			rt := time.Since(e.uinputBsSentAt_)
+			log.Printf("[uinputIM] tx %d timer fire (seen=%d expect=%d, RT=%v): commit",
+				txID, e.uinputSeenBs_, e.uinputExpectingBs_, rt)
+			e.uinputEndTxLocked(txID, "timer")
+		})
+		uinputBackspace(deleteLen)
 	} else if addPart != "" {
 		e.commitText(addPart)
 	} else {
@@ -416,24 +434,6 @@ func runePrefixLen(a, b string) int {
 		}
 	}
 	return minLen
-}
-
-// uinputBsFixedDelay sends BS via uinput and enters delete state without
-// echo counting.  The NEXT non-BS key flushes the commit immediately —
-// no buffering, no delay.  A watchdog timer catches the case where the
-// user doesn't type a follow-up key (commits after 300ms).
-func (e *Engine) uinputBsFixedDelay(bsCount int, commitText string) {
-	log.Printf("[uinputIM] fixed-delay: BS=%d commit=%q", bsCount, commitText)
-	e.uinputBsSentAt_ = time.Now()
-	e.uinputExpectingBs_ = bsCount
-	e.uinputSeenBs_ = 0
-	e.uinputPendingCommit_ = commitText
-	e.uinputDeleting_ = true
-	uinputBackspace(bsCount)
-	// Passthrough to protect from typeCodepoint loopback
-	addLen := utf8.RuneCountInString(commitText)
-	ms := time.Duration(bsCount + 3 + addLen*12 + 10) * time.Millisecond
-	e.uinputPassthroughUntil_ = time.Now().Add(ms)
 }
 
 func (e *Engine) expandMacro(str string) string {

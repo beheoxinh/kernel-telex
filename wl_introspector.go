@@ -8,6 +8,15 @@ import (
 
 var wlAppId string
 
+// wlGetFocusWindowClass connects to the Wayland compositor, reads the
+// focused window's app-id through the foreign-toplevel protocol, and returns.
+//
+// The display connection is opened fresh on every call and closed inside the
+// event loop (display.Context().Close()) as soon as the first app-id arrives:
+// holding the connection open would leak one Wayland socket per FocusIn, and
+// the dispatch channel would block forever once the compositor has nothing
+// more to deliver. Closing from inside the loop is safe because Close only
+// tears down the local socket — the appIdChan already carries the result out.
 func wlGetFocusWindowClass() error {
 	display, err := wl.Connect("")
 	if err != nil {
@@ -22,11 +31,15 @@ func wlGetFocusWindowClass() error {
 		select {
 		case wlAppId = <-appIdChan:
 			fmt.Println("wlAppId = ", wlAppId)
+			// Context close inside the event loop: the dispatch arm below
+			// borrows display.Context(), so the connection must be torn
+			// down here — after Close, Dispatch would fail and the loop
+			// exits via return instead of spinning on a dead socket.
+			display.Context().Close()
+			return nil
 		case display.Context().Dispatch() <- struct{}{}:
 		}
 	}
-	display.Context().Close()
-	return nil
 }
 
 func registerGlobals(display *wl.Display, appIdChan chan string) error {

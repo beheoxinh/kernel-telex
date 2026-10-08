@@ -620,61 +620,45 @@ Ví dụ gõ `duowidro` → `đuổi`:
                → timer(EWMA delay)
 ```
 
-### 7.4. Echo counting & Adaptive delay
+### 7.4. Atomic transaction model (2026-10)
 
-**Cơ chế:** Trên Wayland, tín hiệu evdev BS loop back qua IBus thành
-`ProcessKeyEvent(BackSpace)` — gọi là "BS echo". Engine đếm BS echoes
-để biết khi nào app đã xóa xong ký tự cũ, sau đó mới commit ký tự mới.
+Mỗi lần transform là một **transaction nguyên tử**: gửi N evdev BS, rồi
+commit đúng 1 lần qua `IBus CommitText`, rồi replay mọi phím đã buffer.
+Echo chỉ là **accelerator** (đếm đủ `seen >= expecting` thì end tx sớm để
+giảm latency), **không bao giờ là gatekeeper**: timer độc lập
+`uinputTxTimeout()` (clamp EWMA 20–80ms, seed 15ms) được arm ngay khi gửi
+BS, nên zero/partial echo vẫn commit đúng hạn. Không còn `uinputNoEcho_`,
+không còn nhánh `ForwardKeyEvent(0x01000000+r)` (Chromium Wayland nuốt
+Unicode keysym), không còn `uinputPassthroughUntil_` — mọi insert đều qua
+`CommitText`.
 
-**EWMA (Exponentially Weighted Moving Average):**
-```go
-ewma = α * rt + (1 - α) * ewma   // α = 0.5
-delay = max(ewma, 10ms)
-```
+**Stray-BS guard (150ms):** tx end đóng dấu `uinputTxEndAt_`. Một BS
+loopback đến sau commit mà ngoài tx (`!uinputDeleting_`) và trong cửa sổ
+guard bị swallow (`return true`), không forward về app — ký tự vừa commit
+không bao giờ bị xóa nhầm. BS đến sau guard window là phím thật của user.
 
-**Watchdog timeout (300ms):**
-Nếu app không echo BS (vd: Chromium Wayland), watchdog force-commit:
-```
-uinputNoEcho_ = true
-→ Chuyển sang ForwardKeyEvent BS (IBus D-Bus) thay vì chờ echo
-→ Cho đến lần FocusOut tiếp theo
-```
+**Locking:** `uinputProcessKeyEvent` giữ `e.Mutex` suốt quá trình xử lý
+tx-state (timer goroutine cũng giữ mutex), `uinputEndTxLocked` nhả mutex
+quanh I/O D-Bus/evdev rồi lock lại. Test dùng `fakeEngine.mu` cho
+`commitText`/`forwardKeyEvent` — suite xanh dưới `go test -race`.
 
-**Vấn đề với uinputNoEcho_:**
-- Một khi chuyển sang no-echo mode, nó ở đó vĩnh viễn (đến FocusOut)
-- App có thể echo ở field này nhưng không echo ở field khác
-- → stuck ở no-echo mode
+**EWMA latency-only:** `updateUinputEwma` chỉ fold round-trip BS echo vào
+`uinputBsRtEwmaUsec_` (α=0.5); commit timing luôn qua `uinputTxTimeout()`.
+Mọi đường flush (all-echo, timer, FocusIn/Out, wm-change) đi qua
+`uinputEndTxLocked`: stop timer, snapshot + clear `uinputPendingCommit_` và
+`uinputDeferredKeys_/Codes/States_`, commit, replay press+release.
 
-### 7.5. Passthrough protection
+### 7.5. Passthrough protection (đã xóa)
 
-```go
-// Sau khi gửi typeCodepoint (Ctrl+Shift+U...), uinput tạo ra key events
-// loop về IBus. Engine cần ignore các key này để không xử lý lại.
-typeCodepoint:
-    C.uio_key(fd, KEY_LEFTCTRL, 1)
-    C.uio_key(fd, KEY_LEFTSHIFT, 1)
-    ...
-    C.uio_key(fd, KEY_ENTER, 1)
-    // uinputPassthroughUntil_ = now + delay
-```
+`uinputPassthroughUntil_` và `uinputBsFixedDelay()` đã bị xóa cùng nhánh
+NoEcho: cơ chế cũ là dead code (set nhưng không check) và không tương thích
+Chromium Wayland. Thay bằng stray-BS guard ở §7.4.
 
-`uinputPassthroughUntil_` được set trong `uinputBsFixedDelay()` nhưng
-**không được check trong `uinputProcessKeyEvent()`** — nó không được dùng!
-Dead code → passthrough protection không hoạt động.
+### 7.6. Fixed delay mode (đã xóa)
 
-### 7.6. Fixed delay mode
+`computeUinputCommitDelay` / `kUinputBsFixedDelayMs` đã bị xóa. Commit timing
+hiện tại: `clamp(EWMA_RT, 20ms, 80ms)` — bounded, thích ứng theo app.
 
-```go
-func (e *Engine) uinputBsFixedDelay(bsCount int, commitText string) {
-    uinputBackspace(bsCount)
-    // Tính thời gian passthrough:
-    addLen := utf8.RuneCountInString(commitText)
-    ms := time.Duration(bsCount + 3 + addLen*12 + 10) * time.Millisecond
-    e.uinputPassthroughUntil_ = time.Now().Add(ms) // ⚠️ không được dùng
-}
-```
-
----
 
 ## 8. Macro Engine & Spell Check
 
@@ -941,6 +925,12 @@ Check environment variables: SteamAppId, WINEPREFIX, STEAM_COMPAT_DATA_PATH.
    b. isWayland = true (có WAYLAND_DISPLAY)
    c. hasGnome → true
    d. go wlGetFocusWindowClass() → Wayland event loop
+      (wl_introspector.go: mỗi lần gọi mở một connection mới qua
+      wl.Connect, đọc app-id của focused window qua giao thức
+      foreign-toplevel, rồi đóng connection NGAY BÊN TRONG event loop
+      bằng display.Context().Close() khi app-id đầu tiên về tới —
+      không giữ socket qua nhiều lần FocusIn, tránh leak một Wayland
+      socket mỗi lần focus đổi và tránh Dispatch kẹt trên socket chết)
    e. go uinputInitDirect() → mở /dev/uinput
    f. GetIBusEngineCreator()
       → keyPressCapturing() goroutine

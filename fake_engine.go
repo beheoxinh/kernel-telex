@@ -1,6 +1,8 @@
 package main
 
 import (
+	"sync"
+
 	ibus "github.com/BambooEngine/goibus"
 	"github.com/godbus/dbus/v5"
 )
@@ -48,6 +50,9 @@ type IEngine interface {
 }
 
 type fakeEngine struct {
+	// mu guards commitText/forwardKeyEvent: the tx fallback timer fires on
+	// its own goroutine, so -race sees concurrent access without this.
+	mu                  sync.Mutex
 	commitText          string
 	preeditText         string
 	committed           bool
@@ -153,11 +158,15 @@ func (e *fakeEngine) Destroy() *dbus.Error {
 
 // @signal(signature="v")
 func (e *fakeEngine) CommitText(text *ibus.Text) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.commitText += text.Text
 }
 
 // @signal(signature="uuu")
 func (e *fakeEngine) ForwardKeyEvent(keyval uint32, keycode uint32, state uint32) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.forwardKeyEvent = [3]uint32{keyval, keycode, state}
 }
 
@@ -233,6 +242,8 @@ func (e *fakeEngine) UpdateProperty(prop *ibus.Property) {
 
 // @signal(signature="iu")
 func (e *fakeEngine) DeleteSurroundingText(offset_from_cursor int32, nchars uint32) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	s := []rune(e.commitText)
 	var txt string
 	for _, ch := range s[:len(s)-int(nchars)] {
