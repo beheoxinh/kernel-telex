@@ -120,12 +120,28 @@ func (e *Engine) updateUinputEwma(rt time.Duration) {
 // EWMA constants for adaptive commit delay (mirrors skey's kBsRtEwmaAlpha etc.)
 const (
 	kUinputEwmaAlpha      = 0.5
+	kUinputMinUsec        = 10000 // 10ms minimum commit delay
 	kUinputInitUsec       = 15000 // 15ms initial EWMA seed
 	kUinputStaleTimeout   = 300 * time.Millisecond // watchdog: reset stuck state
-	kUinputTxMinUsec      = 20000                   // 20ms lower bound for tx commit timeout
-	kUinputTxMaxUsec      = 80000                   // 80ms upper bound for tx commit timeout
-	kUinputStrayBsGuard   = 150 * time.Millisecond  // swallow post-commit BS echoes within this window
+	kUinputTxMinUsec      = 20000                   // 20ms lower bound for fallback timer
+	kUinputTxMaxUsec      = 80000                   // 80ms upper bound for fallback timer
+	kUinputStrayBsGuard   = 80 * time.Millisecond   // swallow post-commit late duplicate BS echoes
 )
+
+// computeCommitDelay calculates adaptive delay (in µs) between last BS echo
+// and CommitText so the client application has time to process the Backspace
+// before replacement text arrives.
+func (e *Engine) computeCommitDelay(rt time.Duration) time.Duration {
+	e.updateUinputEwma(rt)
+	delayUsec := e.uinputBsRtEwmaUsec_
+	if delayUsec < kUinputMinUsec {
+		delayUsec = kUinputMinUsec
+	}
+	if delayUsec > 30000 {
+		delayUsec = 30000 // cap commit delay at 30ms
+	}
+	return time.Duration(delayUsec) * time.Microsecond
+}
 
 // uinputTxTimeout bounds the tx commit wait from the EWMA of measured
 // BS-echo round trips: clamp(ewma, 20ms, 80ms). Echo is an accelerator,
@@ -165,7 +181,6 @@ func (e *Engine) uinputEndTxLocked(txID uint64, reason string) {
 	e.uinputDeferredStates_ = nil
 	e.uinputTxEndAt_ = time.Now()
 	e.uinputNoEcho_ = false
-	e.Unlock()
 	log.Printf("[uinputIM] tx end (%s): commit %q, replay %d keys", reason, cText, len(keys))
 	if cText != "" {
 		e.commitText(cText)
@@ -175,7 +190,6 @@ func (e *Engine) uinputEndTxLocked(txID uint64, reason string) {
 		e.ForwardKeyEvent(keys[i], codes[i], states[i])
 		e.ForwardKeyEvent(keys[i], codes[i], states[i]|IBusReleaseMask)
 	}
-	e.Lock()
 }
 
 // uinputProcessKeyEvent handles UinputIM on Wayland.
@@ -266,9 +280,20 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 			log.Printf("[uinputIM] BS echo %d/%d (forward)", e.uinputSeenBs_, e.uinputExpectingBs_)
 			if e.uinputSeenBs_ >= e.uinputExpectingBs_ {
 				rt := time.Since(e.uinputBsSentAt_)
-				e.updateUinputEwma(rt)
+				delay := e.computeCommitDelay(rt)
 				txID := e.uinputTxID_
-				e.uinputEndTxLocked(txID, "all-echo")
+				if e.uinputCommitTimer_ != nil {
+					e.uinputCommitTimer_.Stop()
+				}
+				log.Printf("[uinputIM] all BS done, RT=%v, commit in %v", rt, delay)
+				e.uinputCommitTimer_ = time.AfterFunc(delay, func() {
+					e.Lock()
+					defer e.Unlock()
+					if e.uinputTxID_ != txID || !e.uinputDeleting_ {
+						return
+					}
+					e.uinputEndTxLocked(txID, "all-echo")
+				})
 			}
 			return false, nil
 		}
