@@ -150,7 +150,7 @@ func uinputDirectBackspace(n int) {
 	}
 	for i := 0; i < n; i++ {
 		C.uio_key(uinputFd, C.KEY_BACKSPACE, 1)
-		C.usleep(C.useconds_t(5000))
+		C.usleep(C.useconds_t(3000))
 		C.uio_key(uinputFd, C.KEY_BACKSPACE, 0)
 		C.usleep(C.useconds_t(1000))
 	}

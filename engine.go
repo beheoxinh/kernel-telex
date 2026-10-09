@@ -58,6 +58,8 @@ type Engine struct {
 	uinputDeleting_         bool    // true while waiting for BS echoes
 	uinputExpectingBs_      int     // BS echoes we're waiting for
 	uinputSeenBs_           int     // BS echoes counted so far
+	uinputOwedBs_           int     // BS echoes still owed when tx completed early (debt counter)
+	uinputOwedExpiresAt_    time.Time // expiry for owed BS echo debt
 	uinputPendingCommit_    string  // text to commit after all BS done
 	uinputDeferredKeys_     []uint32 // buffered key vals during pending BS
 	uinputDeferredCodes_    []uint32 // buffered key codes

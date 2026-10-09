@@ -123,9 +123,12 @@ const (
 	kUinputMinUsec        = 10000 // 10ms minimum commit delay
 	kUinputInitUsec       = 15000 // 15ms initial EWMA seed
 	kUinputStaleTimeout   = 300 * time.Millisecond // watchdog: reset stuck state
-	kUinputTxMinUsec      = 20000                   // 20ms lower bound for fallback timer
-	kUinputTxMaxUsec      = 80000                   // 80ms upper bound for fallback timer
-	kUinputStrayBsGuard   = 80 * time.Millisecond   // swallow post-commit late duplicate BS echoes
+	kUinputTxMinUsec      = 20000                   // 20ms base lower bound for fallback timer
+	kUinputTxMaxUsec      = 150000                  // 150ms upper bound for fallback timer
+	kUinputBsPeriodUsec   = 4000                    // 4ms per BS hardware inject duration (3ms press + 1ms release)
+	kUinputTxSafetyUsec   = 25000                   // 25ms safety margin for fallback timer
+	kUinputStrayBsGuard   = 80 * time.Millisecond   // secondary window for stray duplicate echoes
+	kUinputOwedExpiry     = 300 * time.Millisecond  // watchdog expiration for echo debt
 )
 
 // computeCommitDelay calculates adaptive delay (in µs) between last BS echo
@@ -143,23 +146,30 @@ func (e *Engine) computeCommitDelay(rt time.Duration) time.Duration {
 	return time.Duration(delayUsec) * time.Microsecond
 }
 
-// uinputTxTimeout bounds the tx commit wait from the EWMA of measured
-// BS-echo round trips: clamp(ewma, 20ms, 80ms). Echo is an accelerator,
-// never a gatekeeper: the timer armed at BS-send fires even on zero echo.
-func uinputTxTimeout(ewmaUsec int64) time.Duration {
-	if ewmaUsec < kUinputTxMinUsec {
-		ewmaUsec = kUinputTxMinUsec
+// uinputTxTimeout calculates dynamic fallback timeout taking into account
+// the physical hardware injection time (deleteLen * 4ms), measured round-trip EWMA,
+// and a safety margin.
+func uinputTxTimeout(ewmaUsec int64, deleteLen int) time.Duration {
+	if deleteLen < 1 {
+		deleteLen = 1
 	}
-	if ewmaUsec > kUinputTxMaxUsec {
-		ewmaUsec = kUinputTxMaxUsec
+	injectUsec := int64(deleteLen) * kUinputBsPeriodUsec
+	calcUsec := injectUsec + ewmaUsec + kUinputTxSafetyUsec
+	minUsec := injectUsec + kUinputTxMinUsec
+	if calcUsec < minUsec {
+		calcUsec = minUsec
 	}
-	return time.Duration(ewmaUsec) * time.Microsecond
+	if calcUsec > kUinputTxMaxUsec {
+		calcUsec = kUinputTxMaxUsec
+	}
+	return time.Duration(calcUsec) * time.Microsecond
 }
 
 // uinputEndTxLocked finishes the active transaction: stops the fallback
 // timer, clears delete state, records the stray-BS guard timestamp,
-// commits the replacement text via IBus CommitText, and replays every
-// deferred key. Call with e.Mutex held; releases it around I/O.
+// tracks echo debt if tx ended with in-flight BS echoes, commits the
+// replacement text via IBus CommitText, and replays every deferred key.
+// Call with e.Mutex held; releases it around I/O.
 func (e *Engine) uinputEndTxLocked(txID uint64, reason string) {
 	if e.uinputTxID_ != txID {
 		return
@@ -168,6 +178,17 @@ func (e *Engine) uinputEndTxLocked(txID uint64, reason string) {
 		e.uinputCommitTimer_.Stop()
 		e.uinputCommitTimer_ = nil
 	}
+
+	// Echo debt tracking: if the transaction finished with seen < expect
+	// (e.g. fallback timer fired or wm-change), record remaining echoes as debt
+	// so late arrivals are swallowed instead of treated as user backspaces.
+	if e.uinputExpectingBs_ > e.uinputSeenBs_ {
+		debt := e.uinputExpectingBs_ - e.uinputSeenBs_
+		e.uinputOwedBs_ += debt
+		e.uinputOwedExpiresAt_ = time.Now().Add(kUinputOwedExpiry)
+		log.Printf("[uinputIM] tx end (%s): recorded echo debt=%d (total owed=%d)", reason, debt, e.uinputOwedBs_)
+	}
+
 	cText := e.uinputPendingCommit_
 	e.uinputPendingCommit_ = ""
 	e.uinputDeleting_ = false
@@ -219,10 +240,20 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 	defer e.Unlock()
 	var keyRune = rune(keyVal)
 
-	// Echo guard (T6): a BS loopback arriving after the transaction ended
-	// is a stray echo, not a user keystroke — swallow it so the just
-	// committed text is never deleted.
+	// Echo guard (T6) + Echo Debt (T10):
+	// 1. If we have recorded echo debt from a premature tx end, swallow
+	//    the late arriving BS echoes until debt is repaid.
+	// 2. If within stray guard window after normal tx end, swallow duplicate echoes.
 	if keyVal == IBusBackSpace && !e.uinputDeleting_ {
+		if e.uinputOwedBs_ > 0 {
+			if time.Now().Before(e.uinputOwedExpiresAt_) {
+				e.uinputOwedBs_--
+				log.Printf("[uinputIM] swallow owed BS echo (remaining debt=%d)", e.uinputOwedBs_)
+				return true, nil
+			}
+			log.Printf("[uinputIM] owed BS debt expired (clearing %d)", e.uinputOwedBs_)
+			e.uinputOwedBs_ = 0
+		}
 		if !e.uinputTxEndAt_.IsZero() && time.Since(e.uinputTxEndAt_) < kUinputStrayBsGuard {
 			log.Printf("[uinputIM] stray BS echo after tx end: swallow (guard %v)", kUinputStrayBsGuard)
 			return true, nil
@@ -344,6 +375,21 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 				e.uinputSeenBs_ = 0
 				e.uinputPendingCommit_ = macText
 				e.uinputDeleting_ = true
+				e.uinputTxID_++
+				txID := e.uinputTxID_
+				if e.uinputCommitTimer_ != nil {
+					e.uinputCommitTimer_.Stop()
+				}
+				timeout := uinputTxTimeout(e.uinputBsRtEwmaUsec_, rawLen)
+				log.Printf("[uinputIM] macro tx %d armed: fallback commit in %v", txID, timeout)
+				e.uinputCommitTimer_ = time.AfterFunc(timeout, func() {
+					e.Lock()
+					defer e.Unlock()
+					if e.uinputTxID_ != txID || !e.uinputDeleting_ {
+						return
+					}
+					e.uinputEndTxLocked(txID, "macro-timer")
+				})
 				uinputBackspace(rawLen)
 			} else {
 				e.commitText(macText)
@@ -414,7 +460,7 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		if e.uinputCommitTimer_ != nil {
 			e.uinputCommitTimer_.Stop()
 		}
-		timeout := uinputTxTimeout(e.uinputBsRtEwmaUsec_)
+		timeout := uinputTxTimeout(e.uinputBsRtEwmaUsec_, deleteLen)
 		log.Printf("[uinputIM] tx %d armed: fallback commit in %v", txID, timeout)
 		e.uinputCommitTimer_ = time.AfterFunc(timeout, func() {
 			e.Lock()

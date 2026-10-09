@@ -139,4 +139,36 @@ func TestUinputEchoMatrix(t *testing.T) {
 			t.Fatalf("commitText=%q after stray echo, want %q", got, "á")
 		}
 	})
+
+	t.Run("echo_debt_swallow", func(t *testing.T) {
+		e, fe := newUinputEchoEngine(t)
+		startDoubleBsTx(t, e)
+		// Simulate timer fire with only 1 echo received (debt = 1)
+		feedUinputKey(t, e, IBusBackSpace)
+		pollCommitText(t, fe, "ăn", 200*time.Millisecond)
+		e.Lock()
+		owed := e.uinputOwedBs_
+		e.Unlock()
+		if owed != 1 {
+			t.Fatalf("expected owed debt=1, got %d", owed)
+		}
+		// Sleep past the 80ms stray guard to prove the debt counter is what protects it
+		time.Sleep(100 * time.Millisecond)
+		// Late arrival of the 2nd echo should be swallowed by debt counter
+		if ret := feedUinputKey(t, e, IBusBackSpace); !ret {
+			t.Fatalf("late 2nd BS echo: expected swallow by debt counter (true), got forward (false)")
+		}
+		e.Lock()
+		owedAfter := e.uinputOwedBs_
+		e.Unlock()
+		if owedAfter != 0 {
+			t.Fatalf("expected debt=0 after swallowing, got %d", owedAfter)
+		}
+		fe.mu.Lock()
+		got := fe.commitText
+		fe.mu.Unlock()
+		if got != "ăn" {
+			t.Fatalf("commitText=%q corrupted, want %q", got, "ăn")
+		}
+	})
 }
