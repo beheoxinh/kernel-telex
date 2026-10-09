@@ -146,6 +146,7 @@ long x11GetFocusPID() {
 char * x11GetFocusWindowClass() {
     Display * dpy;
     dpy = XOpenDisplay(NULL);
+    if (!dpy) return NULL;
     char * wm = x11GetFocusWindowClassByDpy(dpy);
     XCloseDisplay(dpy);
     return wm;

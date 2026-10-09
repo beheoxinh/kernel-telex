@@ -399,6 +399,15 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		return false, nil
 	}
 
+	// ── Enter / Return: commit composition or fast-path forward ──
+	if keyVal == IBusReturn || keyVal == IBusKP_Enter {
+		if e.getRawKeyLen() > 0 {
+			log.Printf("[uinputIM] Enter: commit preedit=%q, forward to app", e.uinputPreeditString())
+			e.resetPreedit()
+		}
+		return false, nil
+	}
+
 	// ── Word break (space/punctuation) ──
 	if bamboo.IsWordBreakSymbol(keyRune) {
 		if e.getRawKeyLen() > 0 {

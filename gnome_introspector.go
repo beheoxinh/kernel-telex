@@ -73,6 +73,9 @@ func getWmClassFromEval() (string, error) {
 }
 
 func gnomeGetFocusPID() (int, error) {
+	if pid, err := getPIDFromExtension(); err == nil && pid > 0 {
+		return pid, nil
+	}
 	conn, err := dbus.SessionBus()
 	if err != nil {
 		return 0, fmt.Errorf("session bus: %w", err)
@@ -109,6 +112,26 @@ func gnomeGetFocusPID() (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("gnome eval pid failed: ok=%v pid=%q", ok, pidStr)
+}
+
+func getPIDFromExtension() (int, error) {
+	conn, err := dbus.SessionBus()
+	if err != nil {
+		return 0, fmt.Errorf("session bus: %w", err)
+	}
+	defer conn.Close()
+
+	obj := conn.Object(wmclassHelperBusName, dbus.ObjectPath(wmclassHelperObjPath))
+	call := obj.Call(wmclassHelperIface+".GetFocusedWindowPID", 0)
+	if call.Err != nil {
+		return 0, fmt.Errorf("WMClassHelper D-Bus: %w", call.Err)
+	}
+
+	var pid int32
+	if err := call.Store(&pid); err != nil {
+		return 0, fmt.Errorf("WMClassHelper Store: %w", err)
+	}
+	return int(pid), nil
 }
 
 func isGnomeOverviewVisible(conn *dbus.Conn) bool {

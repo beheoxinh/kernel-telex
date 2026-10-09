@@ -70,6 +70,7 @@ const (
 	IBusPageDown        = 0xFF56
 	IBusBackSpace       = 0xff08
 	IBusReturn          = 0xff0d
+	IBusKP_Enter        = 0xff8d
 	IBusEscape          = 0xff1b
 	IBusShiftL          = 0xffe1
 	IBusShiftR          = 0xffe2

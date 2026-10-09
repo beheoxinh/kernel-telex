@@ -259,6 +259,7 @@ func TestUinputAppMatrixFocusOut(t *testing.T) {
 // flap during typing. The preeditor buffer and syllable composition must NOT be wiped.
 func TestUinputAppMatrixFocusFlap(t *testing.T) {
 	a := newAppModel(t)
+	a.e.wmClasses = "chromium-browser:Chromium-browser"
 	// Type "tiee" -> transforms to "tiê"
 	a.typeKey('t')
 	a.typeKey('i')
@@ -270,7 +271,7 @@ func TestUinputAppMatrixFocusFlap(t *testing.T) {
 
 	// Simulate Chromium transient FocusOut followed by FocusIn
 	a.e.FocusOut()
-	a.e.FocusIn()
+	a.e.checkWmClass("chromium-browser:Chromium-browser")
 
 	// Continue typing "ngs" -> should form "tiếng", NOT "ngs" or "tiêngs"
 	a.typeKey('n')

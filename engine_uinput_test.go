@@ -205,4 +205,34 @@ func TestUinputEchoMatrix(t *testing.T) {
 			t.Fatalf("FocusOut should reset rawKeyLen, got %d", e.getRawKeyLen())
 		}
 	})
+
+	t.Run("enter_key_fast_path_in_game_and_empty_buffer", func(t *testing.T) {
+		fe := NewFakeEngine()
+		engineName := "test-enter-fast-path"
+		cfg := config.DefaultCfg(engineName)
+		cfg.DefaultInputMode = config.UinputIM
+		inputMethod := bamboo.ParseInputMethod(cfg.InputMethodDefinitions, cfg.InputMethod)
+		e := NewIbusBambooEngine(engineName, &cfg, fe, bamboo.NewEngine(inputMethod, cfg.Flags))
+
+		// When buffer is empty: Return / KP_Enter should fast-path return (false, nil)
+		consumed, err := e.ProcessKeyEvent(IBusReturn, IBusReturn, 0)
+		if err != nil || consumed {
+			t.Fatalf("empty buffer Enter: expected consumed=false, got %v", consumed)
+		}
+		consumed, err = e.ProcessKeyEvent(IBusKP_Enter, IBusKP_Enter, 0)
+		if err != nil || consumed {
+			t.Fatalf("empty buffer KP_Enter: expected consumed=false, got %v", consumed)
+		}
+
+		// When isGame = true: Return / KP_Enter should fast-path return (false, nil) immediately
+		e.isGame = true
+		consumed, err = e.ProcessKeyEvent(IBusReturn, IBusReturn, 0)
+		if err != nil || consumed {
+			t.Fatalf("game mode Enter: expected consumed=false, got %v", consumed)
+		}
+		consumed, err = e.ProcessKeyEvent(IBusKP_Enter, IBusKP_Enter, 0)
+		if err != nil || consumed {
+			t.Fatalf("game mode KP_Enter: expected consumed=false, got %v", consumed)
+		}
+	})
 }

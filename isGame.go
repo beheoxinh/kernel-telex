@@ -104,18 +104,91 @@ func readPPid(pid int) int {
 	return 0
 }
 
-func getFocusedPID() int {
+var knownGamePatterns = []string{
+	"steam_app_",
+	"gamescope",
+	"wine",
+	"proton",
+	"lutris",
+	"heroic",
+	"dota2",
+	"cs2",
+	"csgo",
+	"hl2",
+	"tf2",
+	"retroarch",
+	"dosbox",
+	"yuzu",
+	"ryujinx",
+	"rpcs3",
+	"dolphin-emu",
+	"pcsx2",
+	"cemu",
+}
+
+func isGameByWmClass(wmClass string) bool {
+	if wmClass == "" {
+		return false
+	}
+	norm := strings.ToLower(wmClass)
+	for _, p := range knownGamePatterns {
+		if strings.Contains(norm, p) {
+			log.Printf("[gameDetect] wmClass %q matches game pattern %q", wmClass, p)
+			return true
+		}
+	}
+	return false
+}
+
+func findPidByWmClass(wmClass string) int {
+	if wmClass == "" {
+		return 0
+	}
+	norm := strings.ToLower(wmClass)
+	parts := strings.Split(norm, ":")
+	target := parts[len(parts)-1]
+	if target == "" {
+		return 0
+	}
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 {
+			continue
+		}
+		comm, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "comm"))
+		if err == nil {
+			c := strings.ToLower(strings.TrimSpace(string(comm)))
+			if c == target || strings.HasPrefix(target, c) || strings.HasPrefix(c, target) {
+				return pid
+			}
+		}
+	}
+	return 0
+}
+
+func getFocusedPID(wmClass string) int {
 	if isGnome {
 		pid, err := gnomeGetFocusPID()
 		if err == nil && pid > 0 {
 			return pid
 		}
-		log.Printf("[getFocusedPID] gnome failed: %v", err)
 	}
 	pid := x11GetFocusPID()
 	if pid > 0 {
-		log.Printf("[getFocusedPID] x11: %d", pid)
 		return pid
+	}
+	if wmClass != "" {
+		if p := findPidByWmClass(wmClass); p > 0 {
+			return p
+		}
 	}
 	return 0
 }

@@ -141,6 +141,17 @@ func (e *Engine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (b
 	if ret, retValue := e.processShortcutKey(keyVal, keyCode, state); ret {
 		return retValue, nil
 	}
+
+	// Fast-path: In games or when buffer is empty, immediately forward Enter key (IBusReturn / IBusKP_Enter)
+	// to avoid focus-grab race conditions in game chat inputs.
+	if keyVal == IBusReturn || keyVal == IBusKP_Enter {
+		if e.isGame || e.getRawKeyLen() == 0 {
+			if e.getRawKeyLen() > 0 {
+				e.resetBuffer()
+			}
+			return false, nil
+		}
+	}
 	if e.inBackspaceWhiteList() {
 		return e.bsProcessKeyEvent(keyVal, keyCode, state)
 	}
@@ -166,12 +177,17 @@ func (e *Engine) FocusIn() *dbus.Error {
 	log.Printf("FocusIn: %s (IBflags=%d bit21=%d)", latestWm, e.config.IBflags, (e.config.IBflags>>21)&1)
 	e.checkWmClass(latestWm)
 	if e.config.IBflags&config.IBdisableOnGame != 0 {
-		pid := getFocusedPID()
-		e.isGame = isGameProcess(pid)
-		if e.isGame {
-			log.Printf("[gameDetect] input disabled for PID %d (%s)", pid, latestWm)
+		if isGameByWmClass(latestWm) {
+			e.isGame = true
+			log.Printf("[gameDetect] input disabled by WM_CLASS %q", latestWm)
 		} else {
-			log.Printf("[gameDetect] PID %d (%s) not a game", pid, latestWm)
+			pid := getFocusedPID(latestWm)
+			e.isGame = isGameProcess(pid)
+			if e.isGame {
+				log.Printf("[gameDetect] input disabled for PID %d (%s)", pid, latestWm)
+			} else {
+				log.Printf("[gameDetect] PID %d (%s) not a game", pid, latestWm)
+			}
 		}
 	} else {
 		e.isGame = false
@@ -440,10 +456,16 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 	if propName == PropKeyDisableOnGame {
 		if propState == ibus.PROP_STATE_CHECKED {
 			e.config.IBflags |= config.IBdisableOnGame
-			pid := getFocusedPID()
-			e.isGame = isGameProcess(pid)
-			if e.isGame {
-				log.Printf("[gameDetect] input disabled for current PID %d (%s)", pid, e.getWmClass())
+			wm := e.getWmClass()
+			if isGameByWmClass(wm) {
+				e.isGame = true
+				log.Printf("[gameDetect] input disabled by WM_CLASS %q", wm)
+			} else {
+				pid := getFocusedPID(wm)
+				e.isGame = isGameProcess(pid)
+				if e.isGame {
+					log.Printf("[gameDetect] input disabled for current PID %d (%s)", pid, wm)
+				}
 			}
 		} else {
 			e.config.IBflags &= ^config.IBdisableOnGame
