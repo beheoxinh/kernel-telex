@@ -1,7 +1,4 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="icons/vi-candy.svg">
-  <img src="icons/vi.svg" alt="KTelex logo" width="80">
-</picture>
+
 
 # Kernel Telex (KTelex)
 
@@ -25,12 +22,12 @@ KTelex tối ưu trải nghiệm gõ tiếng Việt trên Wayland bằng **chế
 
 ## 🎯 Chế độ gõ
 
-| Chế độ | ID | Đặc điểm |
-|--------|----|----------|
-| **Kernel** | `0` | *(Mặc định)* Gõ qua evdev uinput, không gạch chân. Hoạt động mượt trên mọi app Wayland, Chromium, JetBrains, Game. |
-| **Preedit** | `1` | IBus preedit truyền thống (có gạch chân). Tự động chốt chữ khi mất focus. |
-| **Surround** | `2` | Dùng IBus SurroundingText cho các ứng dụng hỗ trợ. |
-| **Ignore** | `3` | Tắt bộ gõ, passthrough phím gốc (thích hợp cho game và app đồ họa). |
+| Chế độ       | ID  | Đặc điểm                                                                                                           |
+| ------------ | --- | ------------------------------------------------------------------------------------------------------------------ |
+| **Kernel**   | `0` | *(Mặc định)* Gõ qua evdev uinput, không gạch chân. Hoạt động mượt trên mọi app Wayland, Chromium, JetBrains, Game. |
+| **Preedit**  | `1` | IBus preedit truyền thống (có gạch chân). Tự động chốt chữ khi mất focus.                                          |
+| **Surround** | `2` | Dùng IBus SurroundingText cho các ứng dụng hỗ trợ.                                                                 |
+| **Ignore**   | `3` | Tắt bộ gõ, passthrough phím gốc (thích hợp cho game và app đồ họa).                                                |
 
 > Bấm **`Alt+Z`** tại cửa sổ bất kỳ để mở bảng chọn nhanh chế độ gõ cho ứng dụng đó.
 
@@ -47,6 +44,7 @@ KTelex tối ưu trải nghiệm gõ tiếng Việt trên Wayland bằng **chế
 ## 🛠️ Cài đặt & Sử dụng
 
 ### Yêu cầu
+
 - Linux kernel hỗ trợ module `uinput`
 - Go ≥ 1.23, IBus, GTK+ 3.0, libX11
 
