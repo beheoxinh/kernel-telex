@@ -1,192 +1,76 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="icons/vi-candy.svg">
-  <img src="icons/vi.svg" alt="KTelex logo" width="96">
+  <img src="icons/vi.svg" alt="KTelex logo" width="80">
 </picture>
 
 # Kernel Telex (KTelex)
 
-**Bộ gõ tiếng Việt cho Linux Gnome — chạy trên IBus, gõ thẳng qua evdev (kernel).**
+**Bộ gõ tiếng Việt hiệu năng cao cho Linux (GNOME / Wayland / X11) trên nền tảng IBus.**
 
-KTelex là một input method engine (IME) cho IBus framework trên Linux. Khác với các bộ gõ IBus truyền thống chỉ dùng preedit text, KTelex hỗ trợ **chế độ Kernel** — gửi tín hiệu bàn phím trực tiếp qua `/dev/uinput` (evdev), giúp gõ tiếng Việt mượt trong các ứng dụng Wayland, terminal, và các app không hỗ trợ preedit text.
-
----
-
-## Tính năng
-
-| Tính năng | Mô tả |
-|-----------|-------|
-| **4 chế độ gõ** | Kernel (uinput/evdev), Preedit, SurroundingText, Ignore (tắt) |
-| **Chế độ Kernel** | Gõ tiếng Việt qua evdev — hoạt động trên mọi ứng dụng, kể cả game và Wayland |
-| **Hỗ trợ game** | Tự động phát hiện Steam/Proton/Wine/Lutris/Heroic và tạm tắt bộ gõ |
-| **Kiểu gõ** | Telex, VNI, VIQR, và tự định nghĩa |
-| **Bảng mã** | Unicode, TCVN3, VNI Win, VIQR, và nhiều bảng mã khác |
-| **Gõ tắt (Macro)** | Mở rộng từ viết tắt thành văn bản đầy đủ, tự động viết hoa, hot-reload |
-| **Emoji** | Gõ `:` + tên emoji (VD: `:grin`) — tra cứu qua Trie, chọn số |
-| **Kiểm tra chính tả** | Dùng luật ghép vần hoặc từ điển tiếng Việt |
-| **Gán chế độ gõ theo app** | Mỗi ứng dụng có thể có chế độ gõ riêng (VD: game dùng Kernel, browser dùng Preedit) |
-| **Phím tắt** | Custom shortcut cho chuyển chế độ gõ, tắt/mở tiếng Việt, emoji |
-| **Đa màn hình desktop** | Hỗ trợ Wayland (wlr-foreign-toplevel), X11 (Xlib), GNOME Shell (D-Bus) |
-| **EN engine** | Bộ gõ English (US/UK) với macro và game detection |
-| **GUI cấu hình** | GTK3 — chỉnh kiểu gõ, macro, phím tắt, per-app mapping |
-| **Dấu thanh tự do** | Bỏ dấu kiểu tự do hoặc chuẩn (òa vs oà) |
+KTelex tối ưu trải nghiệm gõ tiếng Việt trên Wayland bằng **chế độ Kernel (evdev qua `/dev/uinput`)**: loại bỏ gạch chân khó chịu, chống trượt/nuốt phím khi gõ tốc độ cao, và tương thích mượt mà với Chromium, Electron, JetBrains IDEs, Terminal và Game.
 
 ---
 
-## Chế độ gõ
+## ⚡ Điểm nổi bật
 
-| Chế độ | Tên tắt | Cách hoạt động |
-|--------|---------|----------------|
-| **Kernel** | `UinputIM` | Gửi BackSpace evdev qua /dev/uinput → commit text. Hoạt động trên mọi app (kể cả Chromium Wayland, game). Không gạch chân preedit. |
-| **Preedit** | `PreeditIM` | Dùng IBus preedit text (gạch chân). Phù hợp với app hỗ trợ IBus. |
-| **Surround** | `SurroundingTextIM` | Dùng IBus SurroundingText + DeleteSurroundingText. |
-| **Ignore** | `UsIM` | Tắt bộ gõ — forward hết phím xuống app. |
-
-### Per-app Input Mode Mapping
-
-Mỗi app có thể có chế độ gõ riêng. Nhấn phím tắt **Chuyển chế độ gõ** (mặc định: `Alt+z`) để mở bảng chọn nhanh chế độ gõ cho app hiện tại.
+- **Chế độ Kernel (`/dev/uinput`)**: Giao tiếp trực tiếp tầng evdev với adaptive timing & echo debt guard — không trượt ký tự, không kẹt phím xóa.
+- **Per-App Input Mode**: Gán chế độ gõ riêng cho từng ứng dụng, chuyển đổi tức thì bằng phím tắt (`Alt+Z`).
+- **Tự động nhận diện Game**: Tự tắt bộ gõ khi phát hiện game (Steam, Proton, Wine, Lutris, Heroic...).
+- **Đa dạng kiểu gõ & bảng mã**: Telex, VNI, VIQR; bảng mã Unicode, TCVN3, VNI Win, v.v.
+- **Gõ tắt (Macro) & Emoji**: Macro thông minh tự viết hoa (hot-reload không cần restart), tra cứu Emoji nhanh bằng `:tên_emoji`.
+- **Kiểm tra chính tả**: Tùy chọn kiểm tra theo luật ghép vần hoặc từ điển tiếng Việt.
+- **Giao diện GTK3**: Cài đặt trực quan, dễ quản lý phím tắt và danh sách app.
 
 ---
 
-## Phím tắt (Shortcuts)
+## 🎯 Chế độ gõ
 
-| Hành động | Mặc định |
-|-----------|----------|
-| Chuyển chế độ gõ | `Alt+z` |
-| Khôi phục phím | — |
-| Tạm tắt bộ gõ | — |
-| Emoji | — |
+| Chế độ | ID | Đặc điểm |
+|--------|----|----------|
+| **Kernel** | `0` | *(Mặc định)* Gõ qua evdev uinput, không gạch chân. Hoạt động mượt trên mọi app Wayland, Chromium, JetBrains, Game. |
+| **Preedit** | `1` | IBus preedit truyền thống (có gạch chân). Tự động chốt chữ khi mất focus. |
+| **Surround** | `2` | Dùng IBus SurroundingText cho các ứng dụng hỗ trợ. |
+| **Ignore** | `3` | Tắt bộ gõ, passthrough phím gốc (thích hợp cho game và app đồ họa). |
 
-Cấu hình qua GUI → *KTelex Settings* → tab Phím tắt.
-
----
-
-## Kiểu gõ (Input Methods)
-
-KTelex hỗ trợ các kiểu gõ mặc định:
-
-- **Telex** `(aw → ă, aa → â, dd → đ, ow → ơ, uw → ư, z → sắc, ...)`
-- **VNI** `(a8 → ă, a6 → â, d9 → đ, o7 → ơ, u7 → ư, 1 → sắc, ...)`
-- **VIQR** `(aa → â, dd → đ, ee → ê, oo → ô, ` → huyền, ...)`
-- Tự định nghĩa kiểu gõ riêng qua GUI
+> Bấm **`Alt+Z`** tại cửa sổ bất kỳ để mở bảng chọn nhanh chế độ gõ cho ứng dụng đó.
 
 ---
 
-## Kiểm tra chính tả
+## ⌨️ Phím tắt & Tiện ích
 
-Bật **Spell Check** trong menu Nâng cao → dùng:
-
-1. **Rules** — luật ghép vần tiếng Việt (mặc định)
-2. **Dictionary** — từ điển `vietnamese.cm.dict` (7.884 từ)
-
-Khi bật spell check, KTelex tự động fallback sang English mode nếu chuỗi gõ không phải tiếng Việt hợp lệ.
+- **Đổi chế độ gõ cho app**: `Alt+Z`
+- **Macro (Gõ tắt)**: Cấu hình tại `~/.config/ibus-ktelex/ibus-ktelex.macro.text` theo dạng `vt:cụm từ`. Tự động giữ nguyên kiểu viết hoa (VD: `VT` → `CỤM TỪ`).
+- **Emoji**: Gõ `:` kèm từ khóa tiếng Anh (VD: `:smile`, `:heart`) rồi bấm số hoặc Enter để chọn.
 
 ---
 
-## Macro (Gõ tắt)
-
-Định nghĩa từ viết tắt trong file `~/.config/ibus-ktelex/ibus-ktelex.macro.text`.
-
-Định dạng: `từ_viết_tắt:nội_dung_mở_rộng`
-
-```
-vn:việt nam
-csao:✪
-->:arrow
-```
-
-Tự động viết hoa nếu gõ in hoa (VD: `VN` → `VIỆT NAM`). File được hot-reload mỗi 3 giây.
-
----
-
-## Emoji
-
-Gõ `:` + từ khóa tiếng Anh → hiện lookup table emoji. Chọn bằng số hoặc Enter.
-
-Dùng bộ dữ liệu [EmojiOne](https://www.emojione.com/) (~93.000 mục).
-
----
-
-## Cài đặt
+## 🛠️ Cài đặt & Sử dụng
 
 ### Yêu cầu
+- Linux kernel hỗ trợ module `uinput`
+- Go ≥ 1.23, IBus, GTK+ 3.0, libX11
 
-- Go ≥ 1.23
-- IBus
-- GTK+ 3.0 (cho GUI)
-- libX11, libXtst (cho X11 focus)
-- Linux kernel với `CONFIG_INPUT_UINPUT` (cho chế độ Kernel)
-
-### Từ source
+### Cài đặt từ mã nguồn
 
 ```bash
-git clone https://github.com/beheoxinh/kernel-telex
+git clone https://github.com/beheoxinh/kernel-telex.git
 cd kernel-telex
 make
 sudo make install
 ibus restart
 ```
 
-### Nix
+### Lệnh phát triển
 
 ```bash
-nix build
+make test         # Chạy toàn bộ test suite (kèm race detector)
+make clean        # Dọn dẹp binary và file tạm
 ```
 
-### Arch Linux
-
-PKGBUILD có trong `build/arch/`.
-
-### Debian/Ubuntu
-
-```bash
-make deb
-```
-
-### RPM
-
-```bash
-make rpm
-```
+*Log chẩn đoán: `/tmp/ktelex.log` (khi chạy engine IBus).*
 
 ---
 
-## Kiến trúc
+## 📄 Giấy phép
 
-```
-┌──────────────┐     ┌─────────────────────┐     ┌─────────────┐
-│   Ứng dụng   │◄───►│     IBus Daemon     │◄───►│ ibus-engine-│
-│  (GTK/Qt/WL) │     │  (D-Bus session)    │     │   ktelex    │
-└──────────────┘     └─────────────────────┘     └──────┬──────┘
-                                                         │
-                                    ┌────────────────────┼────────────────────┐
-                                    │                    │                    │
-                               ┌────▼────┐        ┌──────▼───────┐    ┌─────▼──────┐
-                               │ Preedit │        │ uinput-server │    │ Surrounding│
-                               │   IM    │        │  (standalone) │    │  Text IM   │
-                               └─────────┘        │  /dev/uinput  │    └────────────┘
-                                                   └──────┬───────┘
-                                                          │
-                                                   ┌──────▼───────┐
-                                                   │   evdev      │
-                                                   │ (kernel)     │
-                                                   └──────────────┘
-```
-
-
-## Build
-
-```bash
-make              # Build ibus-engine-ktelex + uinput-server
-make test         # Chạy unit tests
-sudo make install # Cài vào /usr
-```
-
-Debug log: `/tmp/ktelex.log` (khi chạy `--ibus`).
-
----
-
-## Giấy phép
-
-GPLv3. Xem [LICENSE](LICENSE).
-
----
+Phát hành theo giấy phép [GPLv3](LICENSE).
