@@ -171,4 +171,38 @@ func TestUinputEchoMatrix(t *testing.T) {
 			t.Fatalf("commitText=%q corrupted, want %q", got, "ăn")
 		}
 	})
+
+	t.Run("focus_out_preedit_mode_commits_pending", func(t *testing.T) {
+		fe := NewFakeEngine()
+		engineName := "test-preedit-focusout"
+		cfg := config.DefaultCfg(engineName)
+		cfg.DefaultInputMode = config.PreeditIM
+		inputMethod := bamboo.ParseInputMethod(cfg.InputMethodDefinitions, cfg.InputMethod)
+		e := NewIbusBambooEngine(engineName, &cfg, fe, bamboo.NewEngine(inputMethod, cfg.Flags))
+
+		// Type in Preedit mode without space
+		e.ProcessKeyEvent('d', 'd', 0)
+		e.ProcessKeyEvent('u', 'u', 0)
+		if e.getRawKeyLen() == 0 {
+			t.Fatalf("expected non-empty preedit buffer")
+		}
+		fe.mu.Lock()
+		preedit := fe.preeditText
+		fe.mu.Unlock()
+		if preedit == "" {
+			t.Fatalf("expected pending preeditText in fake engine")
+		}
+
+		// FocusOut should commit preedit to losing window
+		e.FocusOut()
+		fe.mu.Lock()
+		committed := fe.commitText
+		fe.mu.Unlock()
+		if committed != preedit {
+			t.Fatalf("FocusOut commitText=%q, want %q", committed, preedit)
+		}
+		if e.getRawKeyLen() != 0 {
+			t.Fatalf("FocusOut should reset rawKeyLen, got %d", e.getRawKeyLen())
+		}
+	})
 }

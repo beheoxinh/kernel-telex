@@ -204,7 +204,15 @@ func (e *Engine) FocusOut() *dbus.Error {
 		// If a transaction is actively deleting or pending commit, we let the timer/echo complete normally.
 		return nil
 	}
-	e.resetPreedit()
+	// Commit pending preedit to the losing window now (Bamboo PR #611);
+	// otherwise the uncommitted composing text is dropped or leaks into the next window.
+	e.resetBuffer()
+	if e.isEmojiLTOpened {
+		e.closeEmojiCandidates()
+	}
+	if e.isInputModeLTOpened {
+		e.closeInputModeCandidates()
+	}
 	return nil
 }
 

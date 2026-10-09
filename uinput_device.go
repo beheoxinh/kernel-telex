@@ -6,11 +6,12 @@ package main
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
 static int uio_open(void) {
-	return open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+	return open("/dev/uinput", O_WRONLY);
 }
 
 static int uio_setup(int fd, const char *name) {
@@ -45,7 +46,17 @@ static void uio_ev(int fd, uint16_t type, uint16_t code, int32_t value) {
 	ev.type = type;
 	ev.code = code;
 	ev.value = value;
-	write(fd, &ev, sizeof(ev));
+	size_t written = 0;
+	while (written < sizeof(ev)) {
+		ssize_t ret = write(fd, ((const char*)&ev) + written, sizeof(ev) - written);
+		if (ret > 0) {
+			written += (size_t)ret;
+		} else if (ret < 0 && errno == EINTR) {
+			continue;
+		} else {
+			break;
+		}
+	}
 }
 
 static void uio_syn(int fd) {
@@ -58,12 +69,8 @@ static void uio_key(int fd, uint16_t code, int32_t value) {
 }
 
 static void uio_tap(int fd, uint16_t code) {
-	struct input_event ev[3];
-	memset(&ev, 0, sizeof(ev));
-	ev[0].type = EV_KEY; ev[0].code = code; ev[0].value = 1;
-	ev[1].type = EV_KEY; ev[1].code = code; ev[1].value = 0;
-	ev[2].type = EV_SYN; ev[2].code = SYN_REPORT;
-	write(fd, &ev, sizeof(ev));
+	uio_key(fd, code, 1);
+	uio_key(fd, code, 0);
 }
 */
 import "C"
@@ -148,6 +155,10 @@ func uinputDirectBackspace(n int) {
 	if uinputFd < 0 {
 		return
 	}
+	defer func() {
+		// Fail-safe: guarantee KEY_BACKSPACE release event is always posted
+		C.uio_key(uinputFd, C.KEY_BACKSPACE, 0)
+	}()
 	for i := 0; i < n; i++ {
 		C.uio_key(uinputFd, C.KEY_BACKSPACE, 1)
 		C.usleep(C.useconds_t(3000))
