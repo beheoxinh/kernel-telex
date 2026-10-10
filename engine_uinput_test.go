@@ -235,4 +235,101 @@ func TestUinputEchoMatrix(t *testing.T) {
 			t.Fatalf("game mode KP_Enter: expected consumed=false, got %v", consumed)
 		}
 	})
+
+	t.Run("anti_runaway_backspace_burst_suppression", func(t *testing.T) {
+		fe := NewFakeEngine()
+		engineName := "test-anti-runaway"
+		cfg := config.DefaultCfg(engineName)
+		cfg.DefaultInputMode = config.UinputIM
+		inputMethod := bamboo.ParseInputMethod(cfg.InputMethodDefinitions, cfg.InputMethod)
+		e := NewIbusBambooEngine(engineName, &cfg, fe, bamboo.NewEngine(inputMethod, cfg.Flags))
+
+		// Simulate user typing a word without open in-flight tx: "xin"
+		e.ProcessKeyEvent('x', 'x', 0)
+		e.ProcessKeyEvent('i', 'i', 0)
+		e.ProcessKeyEvent('n', 'n', 0)
+
+		initialRawLen := e.getRawKeyLen()
+		if initialRawLen != 3 {
+			t.Fatalf("expected raw key len 3, got %d", initialRawLen)
+		}
+		if e.uinputDeleting_ {
+			t.Fatalf("expected uinputDeleting_ to be false")
+		}
+
+		// First Backspace with normal timing: user backspace -> forwarded (consumed=false)
+		e.uinputLastIdleBsAt_ = time.Now().Add(-100 * time.Millisecond)
+		consumed, err := e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || consumed {
+			t.Fatalf("1st BS should be forwarded to app, got consumed=%v err=%v", consumed, err)
+		}
+
+		// Second Backspace after 30ms (< 45ms): burst count = 2 -> still forwarded
+		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || consumed {
+			t.Fatalf("2nd rapid BS should be forwarded to app, got consumed=%v", consumed)
+		}
+
+		// Third rapid Backspace after 30ms: burst count = 3 >= 3 -> RUNAWAY GUARD TRIGGERS!
+		// It MUST be swallowed (consumed=true), NOT forwarded to app, and NOT modifying preeditor
+		rawLenBeforeRunaway := e.getRawKeyLen()
+		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil {
+			t.Fatalf("3rd BS unexpected error: %v", err)
+		}
+		if !consumed {
+			t.Fatalf("3rd rapid BS (runaway) must be consumed/swallowed, got consumed=false")
+		}
+		if e.getRawKeyLen() != rawLenBeforeRunaway {
+			t.Fatalf("runaway BS modified preeditor: rawLen=%d, want=%d", e.getRawKeyLen(), rawLenBeforeRunaway)
+		}
+
+		// Fourth rapid Backspace -> continues to be swallowed
+		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || !consumed {
+			t.Fatalf("4th rapid BS must be swallowed, got consumed=%v", consumed)
+		}
+
+		// Normal Backspace after delay (> 45ms) resets burst count and behaves normally
+		e.uinputLastIdleBsAt_ = time.Now().Add(-100 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || consumed {
+			t.Fatalf("delayed BS after burst should be forwarded to app, got consumed=%v", consumed)
+		}
+	})
+
+	t.Run("jetbrains_ide_auto_mapping_detection", func(t *testing.T) {
+		fe := NewFakeEngine()
+		engineName := "test-jetbrains-auto"
+		cfg := config.DefaultCfg(engineName)
+		cfg.DefaultInputMode = config.PreeditIM // default is PreeditIM
+		cfg.InputModeMapping = map[string]int{} // empty custom mapping
+		inputMethod := bamboo.ParseInputMethod(cfg.InputMethodDefinitions, cfg.InputMethod)
+		e := NewIbusBambooEngine(engineName, &cfg, fe, bamboo.NewEngine(inputMethod, cfg.Flags))
+
+		testCases := []struct {
+			wmClass  string
+			expected int
+		}{
+			{"jetbrains-idea", config.UinputIM},
+			{"jetbrains-webstorm", config.UinputIM},
+			{"jetbrains-clion", config.UinputIM},
+			{"jetbrains-pycharm-ce", config.UinputIM},
+			{"jetbrains-goland", config.UinputIM},
+			{"jetbrains-fleet", config.UinputIM},
+			{"android-studio", config.UinputIM},
+			{"org.gnome.Terminal", config.PreeditIM}, // non-JetBrains falls back to default
+		}
+
+		for _, tc := range testCases {
+			e.wmClasses = tc.wmClass
+			mode := e.getInputMode()
+			if mode != tc.expected {
+				t.Errorf("getInputMode(%q) = %d, want %d", tc.wmClass, mode, tc.expected)
+			}
+		}
+	})
 }

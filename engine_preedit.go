@@ -353,10 +353,30 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		}
 	}
 
-	// ── Handle user backspace ──
+	// ── Handle user backspace & Anti-runaway watchdog ──
 	// (T6: stray post-commit echoes are already swallowed above; a BS that
 	// reaches here outside the guard window is a genuine user keystroke.)
 	if keyVal == IBusBackSpace {
+		now := time.Now()
+		interval := now.Sub(e.uinputLastIdleBsAt_)
+		e.uinputLastIdleBsAt_ = now
+
+		// If backspaces arrive faster than human typing (< 45ms, e.g. 30ms compositor autorepeat)
+		if interval < 45*time.Millisecond {
+			e.uinputIdleBsBurstCount_++
+			if e.uinputIdleBsBurstCount_ >= 3 {
+				// Anti-runaway: compositor repeat storm detected!
+				// Force release any stuck backspace/modifier key on uinput device
+				uinputReleaseAll()
+				log.Printf("[uinputIM] RUNAWAY BS STORM DETECTED (burst=%d, intv=%v)! Suppressed & swallowed.",
+					e.uinputIdleBsBurstCount_, interval)
+				// Swallow the event: do NOT delete from preeditor and do NOT forward to app
+				return true, nil
+			}
+		} else {
+			e.uinputIdleBsBurstCount_ = 1
+		}
+
 		if e.getRawKeyLen() > 0 {
 			e.preeditor.RemoveLastChar(true)
 			log.Printf("[uinputIM] BS: removeLastChar -> %q (forward to app)", e.uinputPreeditString())

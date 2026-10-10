@@ -276,6 +276,21 @@ func migrateInputMode(im int) int {
 	return im
 }
 
+func isJetBrainsApp(wm string) bool {
+	norm := normalizeWmClass(wm)
+	jbKeywords := []string{
+		"jetbrains-", "idea", "webstorm", "pycharm", "goland",
+		"clion", "phpstorm", "rider", "datagrip", "fleet",
+		"android-studio", "rubymine", "rustrover",
+	}
+	for _, kw := range jbKeywords {
+		if strings.Contains(norm, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) getInputMode() int {
 	var im int
 	if e.respectAppMapping && e.getWmClass() != "" {
@@ -295,6 +310,11 @@ func (e *Engine) getInputMode() int {
 					return im
 				}
 			}
+		}
+		// If application belongs to JetBrains IDE family and has no custom override,
+		// default to UinputIM for maximum stability and proper Backspace handling.
+		if isJetBrainsApp(wm) {
+			return config.UinputIM
 		}
 	}
 	if e.config.IBflags&config.IBdisableOnGame != 0 && e.isGame {

@@ -299,7 +299,18 @@ func DefaultCfg(engineName string) Config {
 		IBflags:                IBstdFlags,
 		Shortcuts:              [10]uint32{8, 122, 0, 0, 0, 0, 0, 0, 0, 0},
 		DefaultInputMode:       UinputIM,
-		InputModeMapping:       map[string]int{},
+		InputModeMapping: map[string]int{
+			"jetbrains-idea":     UinputIM,
+			"jetbrains-webstorm": UinputIM,
+			"jetbrains-pycharm":  UinputIM,
+			"jetbrains-goland":   UinputIM,
+			"jetbrains-clion":    UinputIM,
+			"jetbrains-phpstorm": UinputIM,
+			"jetbrains-rider":    UinputIM,
+			"jetbrains-datagrip": UinputIM,
+			"jetbrains-fleet":    UinputIM,
+			"android-studio":     UinputIM,
+		},
 	}
 }
 

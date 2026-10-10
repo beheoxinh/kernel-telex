@@ -71,6 +71,8 @@ type Engine struct {
 	uinputLastWm_           string    // wmClass that "owns" the current preedit
 	uinputTxID_             uint64    // generation counter for the active transaction
 	uinputTxEndAt_          time.Time // when the last transaction ended (stray-BS guard window)
+	uinputLastIdleBsAt_     time.Time // timestamp of last idle backspace received
+	uinputIdleBsBurstCount_ int       // consecutive rapid backspaces received while idle (runaway guard)
 	emoji                  *EmojiEngine
 	isSurroundingTextReady bool
 	lastKeyWithShift       bool
@@ -218,6 +220,8 @@ func (e *Engine) FocusOut() *dbus.Error {
 		// If the user actually switches apps, the switch is caught by checkWmClass/uinputProcessKeyEvent
 		// or FocusIn on the new window.
 		// If a transaction is actively deleting or pending commit, we let the timer/echo complete normally.
+		// Ensure all virtual input keys are released to prevent compositor autorepeat latches
+		uinputReleaseAll()
 		return nil
 	}
 	// Commit pending preedit to the losing window now (Bamboo PR #611);

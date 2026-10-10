@@ -69,8 +69,40 @@ static void uio_key(int fd, uint16_t code, int32_t value) {
 }
 
 static void uio_tap(int fd, uint16_t code) {
-	uio_key(fd, code, 1);
-	uio_key(fd, code, 0);
+	struct input_event ev[4];
+	memset(ev, 0, sizeof(ev));
+	ev[0].type = EV_KEY; ev[0].code = code; ev[0].value = 1;
+	ev[1].type = EV_SYN; ev[1].code = SYN_REPORT; ev[1].value = 0;
+	ev[2].type = EV_KEY; ev[2].code = code; ev[2].value = 0;
+	ev[3].type = EV_SYN; ev[3].code = SYN_REPORT; ev[3].value = 0;
+
+	size_t total = sizeof(ev);
+	size_t written = 0;
+	while (written < total) {
+		ssize_t ret = write(fd, ((const char*)ev) + written, total - written);
+		if (ret > 0) {
+			written += (size_t)ret;
+		} else if (ret < 0 && errno == EINTR) {
+			continue;
+		} else {
+			break;
+		}
+	}
+}
+
+static void uio_backspace_batch(int fd, int n) {
+	for (int i = 0; i < n; i++) {
+		uio_tap(fd, KEY_BACKSPACE);
+		if (i < n - 1) {
+			usleep(1500);
+		}
+	}
+}
+
+static void uio_release_all(int fd) {
+	uio_key(fd, KEY_BACKSPACE, 0);
+	uio_key(fd, KEY_LEFTCTRL, 0);
+	uio_key(fd, KEY_LEFTSHIFT, 0);
 }
 */
 import "C"
@@ -159,11 +191,17 @@ func uinputDirectBackspace(n int) {
 		// Fail-safe: guarantee KEY_BACKSPACE release event is always posted
 		C.uio_key(uinputFd, C.KEY_BACKSPACE, 0)
 	}()
-	for i := 0; i < n; i++ {
-		C.uio_key(uinputFd, C.KEY_BACKSPACE, 1)
-		C.usleep(C.useconds_t(3000))
-		C.uio_key(uinputFd, C.KEY_BACKSPACE, 0)
-		C.usleep(C.useconds_t(1000))
+	// Atomic tap batching: each backspace is sent as a full [press+syn+release+syn]
+	// in a single write() call, eliminating any prolonged hold state where
+	// compositor autorepeat could latch.
+	C.uio_backspace_batch(uinputFd, C.int(n))
+}
+
+func uinputReleaseAll() {
+	uinputDmu.Lock()
+	defer uinputDmu.Unlock()
+	if uinputFd >= 0 {
+		C.uio_release_all(uinputFd)
 	}
 }
 
