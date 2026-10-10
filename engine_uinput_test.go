@@ -293,11 +293,19 @@ func TestUinputEchoMatrix(t *testing.T) {
 			t.Fatalf("4th rapid BS must be swallowed, got consumed=%v", consumed)
 		}
 
-		// Normal Backspace after delay (> 45ms) resets burst count and behaves normally
-		e.uinputLastIdleBsAt_ = time.Now().Add(-100 * time.Millisecond)
+		// Fifth Backspace after 60ms (< 120ms cooldown guard): JVM GC stutter during repeat storm.
+		// Must continue to be swallowed by cooldown guard!
+		e.uinputLastIdleBsAt_ = time.Now().Add(-60 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || !consumed {
+			t.Fatalf("5th BS during cooldown window (60ms) must still be swallowed, got consumed=%v", consumed)
+		}
+
+		// Normal Backspace after delay (> 120ms cooldown) resets burst count and behaves normally
+		e.uinputLastIdleBsAt_ = time.Now().Add(-200 * time.Millisecond)
 		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
 		if err != nil || consumed {
-			t.Fatalf("delayed BS after burst should be forwarded to app, got consumed=%v", consumed)
+			t.Fatalf("delayed BS after burst (>120ms) should be forwarded to app, got consumed=%v", consumed)
 		}
 	})
 

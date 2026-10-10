@@ -297,7 +297,8 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 	// ── Handle uinput delete state ──
 	// While uinputDeleting_ is true, ALL keys arriving via IBus are
 	// in-flight while evdev BS events travel through kernel compositor.
-	// BS echoes are FORWARDED so the app receives its BackSpace events.
+	// BS echoes are SWALLOWED (return true) to prevent double-deletion
+	// on synchronous toolkits like JetBrains JBR/AWT and Electron.
 	// Non-BS keys are BUFFERED and replayed after commit.
 	if e.uinputDeleting_ {
 		// T9: the independent tx timer owns the commit; a next key only
@@ -308,7 +309,7 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		}
 		if keyVal == IBusBackSpace {
 			e.uinputSeenBs_++
-			log.Printf("[uinputIM] BS echo %d/%d (forward)", e.uinputSeenBs_, e.uinputExpectingBs_)
+			log.Printf("[uinputIM] BS echo %d/%d (swallowed)", e.uinputSeenBs_, e.uinputExpectingBs_)
 			if e.uinputSeenBs_ >= e.uinputExpectingBs_ {
 				rt := time.Since(e.uinputBsSentAt_)
 				delay := e.computeCommitDelay(rt)
@@ -361,11 +362,13 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		interval := now.Sub(e.uinputLastIdleBsAt_)
 		e.uinputLastIdleBsAt_ = now
 
-		// If backspaces arrive faster than human typing (< 45ms, e.g. 30ms compositor autorepeat)
-		if interval < 45*time.Millisecond {
+		// Anti-runaway watchdog:
+		// Rapid backspaces (< 45ms, e.g. 30ms compositor autorepeat) or sustained
+		// repeat storms that experience brief JVM GC pauses / stutter (cooldown < 120ms)
+		// trigger repeat storm suppression.
+		if interval < 45*time.Millisecond || (e.uinputIdleBsBurstCount_ >= 3 && interval < 120*time.Millisecond) {
 			e.uinputIdleBsBurstCount_++
 			if e.uinputIdleBsBurstCount_ >= 3 {
-				// Anti-runaway: compositor repeat storm detected!
 				// Force release any stuck backspace/modifier key on uinput device
 				uinputReleaseAll()
 				log.Printf("[uinputIM] RUNAWAY BS STORM DETECTED (burst=%d, intv=%v)! Suppressed & swallowed.",
