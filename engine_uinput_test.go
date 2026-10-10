@@ -264,26 +264,27 @@ func TestUinputEchoMatrix(t *testing.T) {
 			t.Fatalf("1st BS should be forwarded to app, got consumed=%v err=%v", consumed, err)
 		}
 
-		// Second Backspace after 30ms (< 45ms): burst count = 2 -> still forwarded
-		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
-		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
-		if err != nil || consumed {
-			t.Fatalf("2nd rapid BS should be forwarded to app, got consumed=%v", consumed)
-		}
-
-		// Third rapid Backspace after 30ms: burst count = 3 >= 3 -> RUNAWAY GUARD TRIGGERS!
+		// Second Backspace after 30ms (< 45ms): burst count = 2 -> RUNAWAY GUARD TRIGGERS!
+		// Rapid backspace under 45ms is physically impossible for human typing (30ms autorepeat).
 		// It MUST be swallowed (consumed=true), NOT forwarded to app, and NOT modifying preeditor
 		rawLenBeforeRunaway := e.getRawKeyLen()
 		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
 		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
 		if err != nil {
-			t.Fatalf("3rd BS unexpected error: %v", err)
+			t.Fatalf("2nd BS unexpected error: %v", err)
 		}
 		if !consumed {
-			t.Fatalf("3rd rapid BS (runaway) must be consumed/swallowed, got consumed=false")
+			t.Fatalf("2nd rapid BS (runaway) must be consumed/swallowed, got consumed=false")
 		}
 		if e.getRawKeyLen() != rawLenBeforeRunaway {
 			t.Fatalf("runaway BS modified preeditor: rawLen=%d, want=%d", e.getRawKeyLen(), rawLenBeforeRunaway)
+		}
+
+		// Third rapid Backspace -> continues to be swallowed
+		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || !consumed {
+			t.Fatalf("3rd rapid BS must be swallowed, got consumed=%v", consumed)
 		}
 
 		// Fourth rapid Backspace -> continues to be swallowed
@@ -320,17 +321,11 @@ func TestUinputEchoMatrix(t *testing.T) {
 		if err != nil || consumed {
 			t.Fatalf("1st idle BS on empty buffer should be forwarded, got %v", consumed)
 		}
-		// 2nd BS rapid (30ms): forwarded
-		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
-		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
-		if err != nil || consumed {
-			t.Fatalf("2nd rapid BS on empty buffer should be forwarded, got %v", consumed)
-		}
-		// 3rd BS rapid (30ms): RUNAWAY TRIGGERED even on rawKeyLen == 0!
+		// 2nd BS rapid (30ms): RUNAWAY TRIGGERED even on rawKeyLen == 0!
 		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
 		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
 		if err != nil || !consumed {
-			t.Fatalf("3rd rapid BS on empty buffer MUST be swallowed by watchdog, got %v", consumed)
+			t.Fatalf("2nd rapid BS on empty buffer MUST be swallowed by watchdog, got %v", consumed)
 		}
 	})
 
@@ -347,13 +342,13 @@ func TestUinputEchoMatrix(t *testing.T) {
 			wmClass  string
 			expected int
 		}{
-			{"jetbrains-idea", config.PreeditIM},
-			{"jetbrains-webstorm", config.PreeditIM},
-			{"jetbrains-clion", config.PreeditIM},
-			{"jetbrains-pycharm-ce", config.PreeditIM},
-			{"jetbrains-goland", config.PreeditIM},
-			{"jetbrains-fleet", config.PreeditIM},
-			{"android-studio", config.PreeditIM},
+			{"jetbrains-idea", config.UinputIM},
+			{"jetbrains-webstorm", config.UinputIM},
+			{"jetbrains-clion", config.UinputIM},
+			{"jetbrains-pycharm-ce", config.UinputIM},
+			{"jetbrains-goland", config.UinputIM},
+			{"jetbrains-fleet", config.UinputIM},
+			{"android-studio", config.UinputIM},
 			{"org.gnome.Terminal", config.UinputIM}, // non-JetBrains falls back to default
 		}
 

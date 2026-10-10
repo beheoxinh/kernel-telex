@@ -356,12 +356,12 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		e.uinputLastIdleBsAt_ = now
 
 		// Anti-runaway watchdog:
-		// Rapid backspaces (< 45ms, e.g. 30ms compositor autorepeat) or sustained
-		// repeat storms that experience brief JVM GC pauses / stutter (cooldown < 120ms)
-		// trigger repeat storm suppression.
-		if interval < 45*time.Millisecond || (e.uinputIdleBsBurstCount_ >= 3 && interval < 120*time.Millisecond) {
+		// Rapid backspaces (< 45ms, e.g. 30ms compositor autorepeat) cannot physically
+		// be produced by human fingers (world-record tap interval ~80-100ms).
+		// Intercept and suppress immediately at burst >= 2 (or within 120ms cooldown).
+		if interval < 45*time.Millisecond || (e.uinputIdleBsBurstCount_ >= 2 && interval < 120*time.Millisecond) {
 			e.uinputIdleBsBurstCount_++
-			if e.uinputIdleBsBurstCount_ >= 3 {
+			if e.uinputIdleBsBurstCount_ >= 2 {
 				// Force release any stuck backspace/modifier key on uinput device
 				uinputReleaseAll()
 				log.Printf("[uinputIM] RUNAWAY BS STORM DETECTED (burst=%d, intv=%v)! Suppressed & swallowed.",
