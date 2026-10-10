@@ -307,6 +307,31 @@ func TestUinputEchoMatrix(t *testing.T) {
 		if err != nil || consumed {
 			t.Fatalf("delayed BS after burst (>120ms) should be forwarded to app, got consumed=%v", consumed)
 		}
+
+		// Sixth: Rapid Backspace storm while buffer is COMPLETELY EMPTY (rawKeyLen == 0)
+		// e.preeditor is now empty (rawKeyLen == 0). A repeat storm here must STILL be swallowed!
+		e.resetBuffer()
+		if e.getRawKeyLen() != 0 {
+			t.Fatalf("expected empty buffer, got %d", e.getRawKeyLen())
+		}
+		// 1st BS at idle: forwarded
+		e.uinputLastIdleBsAt_ = time.Now().Add(-200 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || consumed {
+			t.Fatalf("1st idle BS on empty buffer should be forwarded, got %v", consumed)
+		}
+		// 2nd BS rapid (30ms): forwarded
+		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || consumed {
+			t.Fatalf("2nd rapid BS on empty buffer should be forwarded, got %v", consumed)
+		}
+		// 3rd BS rapid (30ms): RUNAWAY TRIGGERED even on rawKeyLen == 0!
+		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil || !consumed {
+			t.Fatalf("3rd rapid BS on empty buffer MUST be swallowed by watchdog, got %v", consumed)
+		}
 	})
 
 	t.Run("jetbrains_ide_auto_mapping_detection", func(t *testing.T) {

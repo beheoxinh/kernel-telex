@@ -347,16 +347,9 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		return false, nil
 	}
 
-	// Skip non-composing keys when engine is idle
-	if !e.shouldRestoreKeyStrokes {
-		if !e.preeditor.CanProcessKey(keyRune) && e.getRawKeyLen() == 0 && e.config.IBflags&config.IBmacroEnabled == 0 {
-			return false, nil
-		}
-	}
-
 	// ── Handle user backspace & Anti-runaway watchdog ──
-	// (T6: stray post-commit echoes are already swallowed above; a BS that
-	// reaches here outside the guard window is a genuine user keystroke.)
+	// (Must be checked BEFORE CanProcessKey / rawKeyLen == 0 check, otherwise
+	// runaway backspaces while idle bypass this watchdog and get forwarded!)
 	if keyVal == IBusBackSpace {
 		now := time.Now()
 		interval := now.Sub(e.uinputLastIdleBsAt_)
@@ -385,6 +378,13 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 			log.Printf("[uinputIM] BS: removeLastChar -> %q (forward to app)", e.uinputPreeditString())
 		}
 		return false, nil
+	}
+
+	// Skip non-composing keys when engine is idle
+	if !e.shouldRestoreKeyStrokes {
+		if !e.preeditor.CanProcessKey(keyRune) && e.getRawKeyLen() == 0 && e.config.IBflags&config.IBmacroEnabled == 0 {
+			return false, nil
+		}
 	}
 
 	// ── Tab ──
