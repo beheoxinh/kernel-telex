@@ -312,9 +312,11 @@ func (e *Engine) getInputMode() int {
 			}
 		}
 		// If application belongs to JetBrains IDE family and has no custom override,
-		// default to UinputIM for maximum stability and proper Backspace handling.
+		// default to PreeditIM: JetBrains JBR/AWT natively supports IBus preedit
+		// and avoiding /dev/uinput Backspace injection completely eliminates Xwayland
+		// XKB autorepeat latches.
 		if isJetBrainsApp(wm) {
-			return config.UinputIM
+			return config.PreeditIM
 		}
 	}
 	if e.config.IBflags&config.IBdisableOnGame != 0 && e.isGame {

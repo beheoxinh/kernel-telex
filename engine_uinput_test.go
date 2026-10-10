@@ -338,7 +338,7 @@ func TestUinputEchoMatrix(t *testing.T) {
 		fe := NewFakeEngine()
 		engineName := "test-jetbrains-auto"
 		cfg := config.DefaultCfg(engineName)
-		cfg.DefaultInputMode = config.PreeditIM // default is PreeditIM
+		cfg.DefaultInputMode = config.UinputIM // default is UinputIM
 		cfg.InputModeMapping = map[string]int{} // empty custom mapping
 		inputMethod := bamboo.ParseInputMethod(cfg.InputMethodDefinitions, cfg.InputMethod)
 		e := NewIbusBambooEngine(engineName, &cfg, fe, bamboo.NewEngine(inputMethod, cfg.Flags))
@@ -347,14 +347,14 @@ func TestUinputEchoMatrix(t *testing.T) {
 			wmClass  string
 			expected int
 		}{
-			{"jetbrains-idea", config.UinputIM},
-			{"jetbrains-webstorm", config.UinputIM},
-			{"jetbrains-clion", config.UinputIM},
-			{"jetbrains-pycharm-ce", config.UinputIM},
-			{"jetbrains-goland", config.UinputIM},
-			{"jetbrains-fleet", config.UinputIM},
-			{"android-studio", config.UinputIM},
-			{"org.gnome.Terminal", config.PreeditIM}, // non-JetBrains falls back to default
+			{"jetbrains-idea", config.PreeditIM},
+			{"jetbrains-webstorm", config.PreeditIM},
+			{"jetbrains-clion", config.PreeditIM},
+			{"jetbrains-pycharm-ce", config.PreeditIM},
+			{"jetbrains-goland", config.PreeditIM},
+			{"jetbrains-fleet", config.PreeditIM},
+			{"android-studio", config.PreeditIM},
+			{"org.gnome.Terminal", config.UinputIM}, // non-JetBrains falls back to default
 		}
 
 		for _, tc := range testCases {
