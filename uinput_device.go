@@ -2,6 +2,7 @@ package main
 
 /*
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -87,6 +88,38 @@ static void uio_release_all(int fd) {
 	uio_key(fd, KEY_BACKSPACE, 0);
 	uio_key(fd, KEY_LEFTCTRL, 0);
 	uio_key(fd, KEY_LEFTSHIFT, 0);
+}
+
+// Queries all physical keyboard event devices to check if KEY_BACKSPACE is physically held down.
+// Ignores the virtual Ktelex-Uinput device.
+// Returns 1 if physically held, 0 if released or on error.
+static int uio_is_physical_backspace_down(void) {
+	char path[64];
+	for (int i = 0; i < 64; i++) {
+		snprintf(path, sizeof(path), "/dev/input/event%d", i);
+		int fd = open(path, O_RDONLY | O_NONBLOCK);
+		if (fd < 0) continue;
+
+		char name[256] = {0};
+		if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) >= 0) {
+			if (strstr(name, "Ktelex") != NULL) {
+				close(fd);
+				continue;
+			}
+		}
+
+		unsigned long key_state[KEY_CNT / (sizeof(unsigned long) * 8) + 1] = {0};
+		if (ioctl(fd, EVIOCGKEY(sizeof(key_state)), key_state) >= 0) {
+			int word = KEY_BACKSPACE / (sizeof(unsigned long) * 8);
+			int bit = KEY_BACKSPACE % (sizeof(unsigned long) * 8);
+			if (key_state[word] & (1UL << bit)) {
+				close(fd);
+				return 1;
+			}
+		}
+		close(fd);
+	}
+	return 0;
 }
 */
 import "C"
@@ -187,6 +220,18 @@ func uinputReleaseAll() {
 	if uinputFd >= 0 {
 		C.uio_release_all(uinputFd)
 	}
+}
+
+// isPhysicalBackspaceDown checks if KEY_BACKSPACE is physically held down on any real keyboard.
+// Used by the anti-runaway watchdog to distinguish genuine user key holds (auto-repeat)
+// from ghost/runaway repeat storms caused by compositor latches.
+var isPhysicalBackspaceDownHook func() bool
+
+func isPhysicalBackspaceDown() bool {
+	if isPhysicalBackspaceDownHook != nil {
+		return isPhysicalBackspaceDownHook()
+	}
+	return C.uio_is_physical_backspace_down() != 0
 }
 
 func uinputInitDirect() {

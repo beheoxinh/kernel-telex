@@ -327,6 +327,20 @@ func TestUinputEchoMatrix(t *testing.T) {
 		if err != nil || !consumed {
 			t.Fatalf("2nd rapid BS on empty buffer MUST be swallowed by watchdog, got %v", consumed)
 		}
+
+		// Seventh: User genuinely HOLDING physical Backspace (physical key is down)
+		// When isPhysicalBackspaceDown() returns true, rapid 30ms autorepeat events MUST be forwarded!
+		isPhysicalBackspaceDownHook = func() bool { return true }
+		defer func() { isPhysicalBackspaceDownHook = nil }()
+
+		e.uinputLastIdleBsAt_ = time.Now().Add(-30 * time.Millisecond)
+		consumed, err = e.ProcessKeyEvent(IBusBackSpace, IBusBackSpace, 0)
+		if err != nil {
+			t.Fatalf("physical hold BS unexpected error: %v", err)
+		}
+		if consumed {
+			t.Fatalf("user physically holding Backspace must NOT be swallowed, got consumed=true")
+		}
 	})
 
 	t.Run("jetbrains_ide_auto_mapping_detection", func(t *testing.T) {

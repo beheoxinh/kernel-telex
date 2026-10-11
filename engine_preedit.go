@@ -358,16 +358,25 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		// Anti-runaway watchdog:
 		// Rapid backspaces (< 45ms, e.g. 30ms compositor autorepeat) cannot physically
 		// be produced by human fingers (world-record tap interval ~80-100ms).
-		// Intercept and suppress immediately at burst >= 2 (or within 120ms cooldown).
+		// However, if the user is genuinely HOLDING the physical Backspace key down,
+		// the compositor produces 30ms autorepeat events legitimately.
+		// Query the physical keyboard state via EVIOCGKEY:
+		// - If physical Backspace is HELD: genuine user hold -> forward to app (do not swallow).
+		// - If physical Backspace is RELEASED: ghost/runaway latch storm -> suppress immediately!
 		if interval < 45*time.Millisecond || (e.uinputIdleBsBurstCount_ >= 2 && interval < 120*time.Millisecond) {
 			e.uinputIdleBsBurstCount_++
 			if e.uinputIdleBsBurstCount_ >= 2 {
-				// Force release any stuck backspace/modifier key on uinput device
-				uinputReleaseAll()
-				log.Printf("[uinputIM] RUNAWAY BS STORM DETECTED (burst=%d, intv=%v)! Suppressed & swallowed.",
+				if !isPhysicalBackspaceDown() {
+					// Force release any stuck backspace/modifier key on uinput device
+					uinputReleaseAll()
+					log.Printf("[uinputIM] RUNAWAY BS STORM DETECTED (burst=%d, intv=%v)! Suppressed & swallowed.",
+						e.uinputIdleBsBurstCount_, interval)
+					// Swallow the event: do NOT delete from preeditor and do NOT forward to app
+					return true, nil
+				}
+				// Genuine physical key hold: user is intentionally holding Backspace
+				log.Printf("[uinputIM] user holding physical Backspace (burst=%d, intv=%v), forwarding to app",
 					e.uinputIdleBsBurstCount_, interval)
-				// Swallow the event: do NOT delete from preeditor and do NOT forward to app
-				return true, nil
 			}
 		} else {
 			e.uinputIdleBsBurstCount_ = 1
