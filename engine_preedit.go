@@ -254,8 +254,8 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 			log.Printf("[uinputIM] owed BS debt expired (clearing %d)", e.uinputOwedBs_)
 			e.uinputOwedBs_ = 0
 		}
-		if !e.uinputTxEndAt_.IsZero() && time.Since(e.uinputTxEndAt_) < kUinputStrayBsGuard {
-			log.Printf("[uinputIM] stray BS echo after tx end: swallow (guard %v)", kUinputStrayBsGuard)
+		if !e.uinputTxEndAt_.IsZero() && time.Since(e.uinputTxEndAt_) < kUinputStrayBsGuard && !isPhysicalBackspaceDown() {
+			log.Printf("[uinputIM] stray BS echo after tx end: swallow (guard %v, physical key up)", kUinputStrayBsGuard)
 			return true, nil
 		}
 		if e.uinputExpectingBs_ == 0 {

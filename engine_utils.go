@@ -162,6 +162,12 @@ func (e *Engine) checkWmClass(newId string) {
 		}
 		return
 	}
+	// Ignore transient desktop shell helper classes (overview, gjs, mutter)
+	// which flap focus during slow typing or pause intervals.
+	norm := normalizeWmClass(newId)
+	if norm == "gjs" || norm == "org.gnome.shell" || norm == "org.gnome.overview" {
+		return
+	}
 	e.wmClasses = newId
 	e.resetBuffer()
 }
