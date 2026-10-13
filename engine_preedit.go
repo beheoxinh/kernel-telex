@@ -127,7 +127,7 @@ const (
 	kUinputTxMaxUsec      = 150000                  // 150ms upper bound for fallback timer
 	kUinputBsPeriodUsec   = 4000                    // 4ms per BS hardware inject duration (3ms press + 1ms release)
 	kUinputTxSafetyUsec   = 25000                   // 25ms safety margin for fallback timer
-	kUinputStrayBsGuard   = 80 * time.Millisecond   // secondary window for stray duplicate echoes
+	kUinputStrayBsGuard   = 150 * time.Millisecond // secondary window for stray duplicate echoes (covers late compositor loopback)
 	kUinputOwedExpiry     = 300 * time.Millisecond  // watchdog expiration for echo debt
 )
 

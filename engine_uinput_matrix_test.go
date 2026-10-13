@@ -333,3 +333,34 @@ func TestUinputAppMatrixWmChange(t *testing.T) {
 		t.Errorf("wm-change: tx still open after switch")
 	}
 }
+
+// TestUinputAppMatrixLateEchoBeyondOldWindow: a stray compositor BS echo that
+// lands well after tx end (beyond the former 80ms window but within the
+// current guard) must still be swallowed, so the just-committed first
+// character of a word (e.g. đ/ê/ý) is never deleted by a late loopback.
+func TestUinputAppMatrixLateEchoBeyondOldWindow(t *testing.T) {
+	isPhysicalBackspaceDownHook = func() bool { return false }
+	defer func() { isPhysicalBackspaceDownHook = nil }()
+
+	a := newAppModel(t)
+	// "d" then "d" -> "đ": the word's opening whole-word replacement (pfx=0).
+	a.typeKey('d')
+	a.typeKey('d')
+	a.awaitIdle(time.Second)
+	if got := a.fe.commitText; got != "đ" {
+		t.Fatalf("setup: expected committed %q, got %q", "đ", got)
+	}
+	before := a.text()
+	// Simulate the loopback echo landing 120ms after tx end: beyond the old
+	// 80ms guard, still within the current window.
+	a.e.Lock()
+	a.e.uinputTxEndAt_ = time.Now().Add(-120 * time.Millisecond)
+	a.e.uinputOwedBs_ = 0
+	a.e.Unlock()
+	if ret := a.typeKey(IBusBackSpace); !ret {
+		t.Fatalf("late echo after tx end: expected swallow (true), got forward (false)")
+	}
+	if got := a.text(); got != before {
+		t.Errorf("late echo changed app buffer %q -> %q", before, got)
+	}
+}
