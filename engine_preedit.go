@@ -101,6 +101,14 @@ func (e *Engine) uinputReplayBuffered() {
 	e.uinputDeferredStates_ = nil
 	for i := range keys {
 		log.Printf("[uinputIM] replay buffered key 0x%04x", keys[i])
+		// Keep the bamboo syllable memory in step with the application: the
+		// replay writes this character into the app buffer, so the preeditor
+		// must advance too. Skipping it leaves the next key composing against
+		// a stale syllable (e.g. "d","d","u" -> app gets "đu" while preeditor
+		// still holds "đ", so the following key yields "đuơ" not "được").
+		if r := rune(keys[i]); r >= 0x20 && r <= 0x7e && states[i]&(IBusControlMask|IBusMod1Mask) == 0 {
+			e.preeditor.ProcessKey(r, bamboo.VietnameseMode)
+		}
 		e.ForwardKeyEvent(keys[i], codes[i], states[i])
 		e.ForwardKeyEvent(keys[i], codes[i], states[i]|IBusReleaseMask)
 	}
@@ -128,6 +136,7 @@ const (
 	kUinputBsPeriodUsec   = 4000                    // 4ms per BS hardware inject duration (3ms press + 1ms release)
 	kUinputTxSafetyUsec   = 25000                   // 25ms safety margin for fallback timer
 	kUinputStrayBsGuard   = 150 * time.Millisecond // secondary window for stray duplicate echoes (covers late compositor loopback)
+	kUinputGhostBsGuard   = 1200 * time.Millisecond // loopback window measured from the last injected BS (Chromium/Ozone echoes arrive far later than 150ms)
 	kUinputOwedExpiry     = 300 * time.Millisecond  // watchdog expiration for echo debt
 )
 
@@ -208,6 +217,14 @@ func (e *Engine) uinputEndTxLocked(txID uint64, reason string) {
 	}
 	for i := range keys {
 		log.Printf("[uinputIM] replay buffered key 0x%04x", keys[i])
+		// Keep the bamboo syllable memory in step with the application: the
+		// replay writes this character into the app buffer, so the preeditor
+		// must advance too. Skipping it leaves the next key composing against
+		// a stale syllable (e.g. "d","d","u" -> app gets "đu" while preeditor
+		// still holds "đ", so the following key yields "đuơ" not "được").
+		if r := rune(keys[i]); r >= 0x20 && r <= 0x7e && states[i]&(IBusControlMask|IBusMod1Mask) == 0 {
+			e.preeditor.ProcessKey(r, bamboo.VietnameseMode)
+		}
 		e.ForwardKeyEvent(keys[i], codes[i], states[i])
 		e.ForwardKeyEvent(keys[i], codes[i], states[i]|IBusReleaseMask)
 	}
@@ -256,6 +273,19 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		}
 		if !e.uinputTxEndAt_.IsZero() && time.Since(e.uinputTxEndAt_) < kUinputStrayBsGuard && !isPhysicalBackspaceDown() {
 			log.Printf("[uinputIM] stray BS echo after tx end: swallow (guard %v, physical key up)", kUinputStrayBsGuard)
+			return true, nil
+		}
+		// Ghost/loopback discriminator measured from the injection instant
+		// rather than from tx end: the compositor can loop our own injected
+		// Backspace back into ProcessKeyEvent well after the 150ms stray
+		// window has closed. A genuine user Backspace (including kernel
+		// autorepeat) always has the physical key held down at delivery time,
+		// so "injected a BS recently AND physical key is up" identifies a
+		// loopback with certainty. Forwarding it would delete a character the
+		// application never received.
+		if !e.uinputBsSentAt_.IsZero() && time.Since(e.uinputBsSentAt_) < kUinputGhostBsGuard && !isPhysicalBackspaceDown() {
+			log.Printf("[uinputIM] ghost/loopback BS swallowed (%v after injected BS, physical key up)",
+				time.Since(e.uinputBsSentAt_))
 			return true, nil
 		}
 		if e.uinputExpectingBs_ == 0 {

@@ -194,9 +194,15 @@ func TestUinputAppMatrixLateStray(t *testing.T) {
 	}
 }
 
-// TestUinputAppMatrixGuardExpiry: after the 150ms stray guard expires, a BS
-// is a genuine user keystroke again and must be forwarded (never swallowed).
+// TestUinputAppMatrixGuardExpiry: a genuine user Backspace must always be
+// forwarded, however recently the engine injected a BS of its own. The
+// discriminator is the physical key state, not elapsed time: a real press
+// (including kernel autorepeat) holds KEY_BACKSPACE down at delivery time,
+// which is what separates it from a compositor loopback of our own BS.
 func TestUinputAppMatrixGuardExpiry(t *testing.T) {
+	isPhysicalBackspaceDownHook = func() bool { return true }
+	defer func() { isPhysicalBackspaceDownHook = nil }()
+
 	a := newAppModel(t)
 	a.drivePerfectEcho("as")
 	time.Sleep(250 * time.Millisecond)
@@ -362,5 +368,40 @@ func TestUinputAppMatrixLateEchoBeyondOldWindow(t *testing.T) {
 	}
 	if got := a.text(); got != before {
 		t.Errorf("late echo changed app buffer %q -> %q", before, got)
+	}
+}
+
+// TestUinputAppMatrixGhostEchoBeyondStrayWindow pins the Chromium/Ozone
+// failure: the compositor loops our injected BS back into ProcessKeyEvent
+// AFTER the 150ms stray window has closed. Because the engine has left the
+// tx, the echo reaches the idle Backspace branch, deletes a real character
+// from the preeditor and forwards the deletion to the app - which is how a
+// short word loses its opening character in Gemini/Chrome. The ghost window
+// is measured from the injection instant, so it must still swallow this.
+func TestUinputAppMatrixGhostEchoBeyondStrayWindow(t *testing.T) {
+	isPhysicalBackspaceDownHook = func() bool { return false }
+	defer func() { isPhysicalBackspaceDownHook = nil }()
+
+	a := newAppModel(t)
+	a.typeKey('d')
+	a.typeKey('d')
+	a.awaitIdle(time.Second)
+	if got := a.fe.commitText; got != "đ" {
+		t.Fatalf("setup: expected committed %q, got %q", "đ", got)
+	}
+	before := a.text()
+
+	// Echo lands 400ms after tx end: well past the 150ms stray window, still
+	// inside the injection-anchored ghost window.
+	a.e.Lock()
+	a.e.uinputTxEndAt_ = time.Now().Add(-400 * time.Millisecond)
+	a.e.uinputOwedBs_ = 0
+	a.e.Unlock()
+
+	if ret := a.typeKey(IBusBackSpace); !ret {
+		t.Fatalf("ghost echo at 400ms: expected swallow (true), got forward (false)")
+	}
+	if got := a.text(); got != before {
+		t.Errorf("ghost echo changed app buffer %q -> %q", before, got)
 	}
 }

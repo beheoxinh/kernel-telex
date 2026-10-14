@@ -96,10 +96,23 @@ static void uio_release_all(int fd) {
 // latency, causing typing lag. Caching verified keyboard fds reduces latency to ~0.8 µs.
 #define MAX_KBD_DEVICES 8
 static int g_kbd_fds[MAX_KBD_DEVICES];
-static int g_kbd_count = -1;
+static int g_kbd_count = 0;
+static int g_kbd_inited = 0;
 
 static void uio_scan_keyboards(void) {
-	for (int i = 0; i < g_kbd_count; i++) {
+	// Static storage zero-initialises to 0, which is a *valid* fd (stdin).
+	// Seed every slot to -1 once before the first close pass so the cleanup
+	// below can never close a descriptor we did not open.
+	if (!g_kbd_inited) {
+		for (int i = 0; i < MAX_KBD_DEVICES; i++) {
+			g_kbd_fds[i] = -1;
+		}
+		g_kbd_inited = 1;
+	}
+	// Close every slot we ever opened, not just [0, g_kbd_count): a count
+	// that shrank (device unplugged mid-scan) used to leave the higher slots
+	// open, and the next scan then leaked those descriptors.
+	for (int i = 0; i < MAX_KBD_DEVICES; i++) {
 		if (g_kbd_fds[i] >= 0) {
 			close(g_kbd_fds[i]);
 			g_kbd_fds[i] = -1;
