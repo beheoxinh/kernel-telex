@@ -200,12 +200,13 @@ func TestUinputAppMatrixLateStray(t *testing.T) {
 // (including kernel autorepeat) holds KEY_BACKSPACE down at delivery time,
 // which is what separates it from a compositor loopback of our own BS.
 func TestUinputAppMatrixGuardExpiry(t *testing.T) {
-	isPhysicalBackspaceDownHook = func() bool { return true }
-	defer func() { isPhysicalBackspaceDownHook = nil }()
-
 	a := newAppModel(t)
 	a.drivePerfectEcho("as")
 	time.Sleep(250 * time.Millisecond)
+	// The user presses Backspace only now; the engine's own echoes above
+	// arrived while the physical key was up, as on a real desktop.
+	isPhysicalBackspaceDownHook = func() bool { return true }
+	defer func() { isPhysicalBackspaceDownHook = nil }()
 	if ret := a.typeKey(IBusBackSpace); ret {
 		t.Fatalf("post-guard BS: expected user-key forward (false), got swallow (true)")
 	}
@@ -231,6 +232,42 @@ func TestUinputAppMatrixDeferredReplay(t *testing.T) {
 	if nbuf != 1 {
 		t.Fatalf("mid-flight key: buffered=%d, want 1", nbuf)
 	}
+	a.typeKey(IBusBackSpace) // echo of the 'as' -> 'á' deletion
+	// The buffered 'x' is replayed through the full Telex logic: it is the
+	// ngã tone key, so it must turn 'á' into 'ã' via a second tx (the old
+	// raw forward produced "áx").
+	deadline := time.Now().Add(time.Second)
+	for {
+		a.e.Lock()
+		del, exp := a.e.uinputDeleting_, a.e.uinputExpectingBs_
+		a.e.Unlock()
+		a.foldCommits()
+		if del && a.seen == "á" {
+			for i := 0; i < exp; i++ {
+				a.typeKey(IBusBackSpace)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replayed 'x' did not open a tone tx (deleting=%v commits=%q)", del, a.seen)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	a.awaitIdle(time.Second)
+	if got := a.text(); got != "ã" {
+		t.Errorf("deferred replay: app buffer=%q, want %q (commits=%q)", got, "ã", a.seen)
+	}
+}
+
+// TestUinputDeferredReplayPlainKey: a non-composing key buffered mid-flight
+// is forwarded (press+release) after the commit, in order.
+func TestUinputDeferredReplayPlainKey(t *testing.T) {
+	a := newAppModel(t)
+	a.typeKey('a')
+	a.typeKey('s')
+	if ret := a.typeKey(' '); !ret {
+		t.Fatalf("mid-flight space: expected buffer-consume (true)")
+	}
 	a.typeKey(IBusBackSpace)
 	a.awaitIdle(time.Second)
 	a.fe.mu.Lock()
@@ -238,10 +275,10 @@ func TestUinputAppMatrixDeferredReplay(t *testing.T) {
 	ct := a.fe.commitText
 	a.fe.mu.Unlock()
 	if ct != "á" {
-		t.Errorf("deferred replay: commit=%q, want %q", ct, "á")
+		t.Errorf("commit=%q, want %q", ct, "á")
 	}
-	if fw[0] != 'x' || fw[2] != IBusReleaseMask {
-		t.Errorf("deferred replay: last ForwardKeyEvent=%v, want release of 'x'", fw)
+	if fw[0] != ' ' || fw[2] != IBusReleaseMask {
+		t.Errorf("last ForwardKeyEvent=%v, want release of ' '", fw)
 	}
 }
 
@@ -273,7 +310,8 @@ func TestUinputAppMatrixFocusFlap(t *testing.T) {
 	a.typeKey('e')
 	// Simulate BS echo arrives
 	a.typeKey(IBusBackSpace)
-	pollCommitText(t, a.fe, "ê", 500*time.Millisecond)
+	// Browsers get a leading " " (inline-completion guard) before the commit.
+	pollCommitText(t, a.fe, " ê", 500*time.Millisecond)
 
 	// Simulate Chromium transient FocusOut followed by FocusIn
 	a.e.FocusOut()
@@ -310,13 +348,13 @@ func TestUinputAppMatrixWmNormalization(t *testing.T) {
 
 	a.typeKey('e') // triggers "tiê"
 	a.typeKey(IBusBackSpace)
-	pollCommitText(t, a.fe, "ê", 500*time.Millisecond)
+	pollCommitText(t, a.fe, " ê", 500*time.Millisecond)
 
 	a.fe.mu.Lock()
 	got := a.fe.commitText
 	a.fe.mu.Unlock()
-	if got != "ê" {
-		t.Errorf("wm normalization typing: commitText=%q, want %q", got, "ê")
+	if got != " ê" {
+		t.Errorf("wm normalization typing: commitText=%q, want %q", got, " ê")
 	}
 }
 

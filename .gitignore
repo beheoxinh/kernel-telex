@@ -22,5 +22,5 @@ ibus-ktelex
 test-data/
 
 # Dependency directories
-vendor/
+# vendor/ is committed: it carries a trimmed bamboo-core (Telex only).
 uinput-server

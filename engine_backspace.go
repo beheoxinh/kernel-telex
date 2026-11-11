@@ -60,7 +60,7 @@ func (e *Engine) bsProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) 
 		}
 		// if the main thread is busy processing, the keypress events come all mixed up
 		// so we enqueue these keypress events and process them sequentially on another thread
-		keyPressChan <- [3]uint32{keyVal, keyCode, state}
+		keyPressChan <- keyPressEvent{e, keyVal, keyCode, state}
 		return true, nil
 	} else {
 		return e.keyPressHandler(keyVal, keyCode, state), nil
@@ -153,7 +153,7 @@ func (e *Engine) updatePreviousText(oldText, newText string) {
 	if nBackSpace > 0 {
 		e.SendBackSpace(nBackSpace)
 	}
-	log.Printf("Updating Previous Text %s ---> %s\n", oldText, newText)
+	debugf("Updating Previous Text %s ---> %s", oldText, newText)
 	e.bsCommitText(offsetRunes)
 }
 
@@ -169,8 +169,8 @@ func (e *Engine) updatePreviousTextInBatch(oldText, newText string, isWordBreakR
 	}
 	var isDirty = false
 	for i := 0; i < len(keyPressChan); i++ {
-		var keyEvents = <-keyPressChan
-		var keyVal, keyCode, state = keyEvents[0], keyEvents[1], keyEvents[2]
+		var ev = <-keyPressChan
+		var keyVal, keyCode, state = ev.keyVal, ev.keyCode, ev.state
 		isValidKey := isValidState(state) && e.isValidKeyVal(keyVal)
 		if isValidKey {
 			var commitText, isWordBreakRune0 = e.getCommitText(keyVal, keyCode, state)
@@ -191,7 +191,7 @@ func (e *Engine) updatePreviousTextInBatch(oldText, newText string, isWordBreakR
 		e.batchCommit(oldText, strings.Join(buffer, ""), nBackSpace, isWordBreakRune)
 		return
 	}
-	log.Printf("Updating Previous Text %s ---> %s\n", oldText, newText)
+	debugf("Updating Previous Text %s ---> %s", oldText, newText)
 	e.bsCommitText(offsetRunes)
 }
 
@@ -211,7 +211,7 @@ func (e *Engine) batchCommit(oldText string, newText string, nBackSpace int, isW
 		var offset = utf8.RuneCountInString(oldText) - nBackSpace
 		patchedRunes = fullRunes[offset:]
 	}
-	log.Printf("\nUpdating Previous Text %s ---> %s\n", oldText, newText)
+	debugf("Updating Previous Text %s ---> %s", oldText, newText)
 	e.bsCommitText(patchedRunes)
 }
 
@@ -251,7 +251,7 @@ func (e *Engine) bsCommitText(rs []rune) {
 		return
 	}
 	if e.checkInputMode(config.UinputIM) {
-		log.Printf("Commit text [%s] via IBus (uinput mode)\n", string(rs))
+		debugf("Commit text [%s] via IBus (uinput mode)", string(rs))
 		e.commitText(string(rs))
 		return
 	}

@@ -7,8 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"ktelex/ui"
 	ibus "github.com/BambooEngine/goibus"
+	"github.com/godbus/dbus/v5"
+	"ktelex/ui"
 )
 
 const (
@@ -26,6 +27,24 @@ func hasGnome(env string) bool {
 	return strings.Contains(strings.ToLower(os.Getenv(env)), "gnome")
 }
 
+// connectIBus is ibus.NewBus with the key-ordering interceptor installed
+// (see keyorder.go), and errors returned instead of panicking.
+func connectIBus() (*dbus.Conn, error) {
+	conn, err := dbus.Dial(ibus.GetAddress(), dbus.WithIncomingInterceptor(keyOrderInterceptor))
+	if err != nil {
+		return nil, err
+	}
+	if err = conn.Auth(ibus.GetUserAuth()); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err = conn.Hello(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
 func main() {
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		isWayland = true
@@ -37,7 +56,7 @@ func main() {
 	if *embedded {
 		os.Chdir(DataDir)
 		// Redirect log output to file for debugging
-		f, err := os.OpenFile("/tmp/ktelex.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		f, err := openLogFile("/tmp/ktelex.log")
 		if err == nil {
 			log.SetOutput(f)
 		}
@@ -53,11 +72,16 @@ func main() {
 	} else if *embedded {
 		go uinputInitDirect()
 		engine := GetIBusEngineCreator()
-		bus := ibus.NewBus()
-		bus.RequestName(ComponentName, 0)
-
-		conn := bus.GetDbusConn()
+		conn, err := connectIBus()
+		if err != nil {
+			log.Fatalf("connect ibus: %v", err)
+		}
+		ibusConn = conn
+		// Export the factory BEFORE owning the name: ibus-daemon calls
+		// CreateEngine as soon as the name appears, and an unexported
+		// factory then fails engine creation at login.
 		ibus.NewFactory(conn, engine)
+		conn.RequestName(ComponentName, 0)
 
 		select {}
 	}

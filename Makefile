@@ -27,7 +27,7 @@ version=0.8.5
 
 PREFIX ?= /usr
 
-engine_dir=$(PREFIX)/share/$(pkg_name)
+engine_dir=$(PREFIX)/share/$(engine_name)
 ibus_dir=$(PREFIX)/share/ibus
 
 GOLDFLAGS=-ldflags "-w -s -X main.Version=$(version) -X main.BuildId=$(shell date +%Y%m%d%H%M%S)
@@ -59,7 +59,7 @@ install: build
 
 uninstall:
 	rm -rf $(DESTDIR)$(engine_dir)
-	rm -rf $(DESTDIR)$(PREFIX)/lib/ibus-$(engine_name)/
+	rm -f $(DESTDIR)$(PREFIX)/libexec/$(ibus_e_name)
 	rm -f $(DESTDIR)$(ibus_dir)/component/$(engine_name).xml
 	rm -rf $(DESTDIR)$(PREFIX)/share/applications/$(engine_gui_name)
 

@@ -174,6 +174,34 @@ func findPidByWmClass(wmClass string) int {
 	return 0
 }
 
+var (
+	gameWmCache   = map[string]bool{}
+	gameWmCacheMu sync.Mutex
+)
+
+// isGameWindow classifies the focused window once per WM_CLASS. Browsers
+// and Electron apps flap FocusIn many times per second; re-running the PID
+// lookup (D-Bus round trips + /proc walk) on every flap was pure latency.
+func isGameWindow(wmClass string) bool {
+	key := strings.ToLower(wmClass)
+	gameWmCacheMu.Lock()
+	cached, ok := gameWmCache[key]
+	gameWmCacheMu.Unlock()
+	if ok {
+		return cached
+	}
+	game := isGameByWmClass(wmClass)
+	if !game {
+		pid := getFocusedPID(wmClass)
+		game = isGameProcess(pid)
+		log.Printf("[gameDetect] %s (pid %d) game=%v", wmClass, pid, game)
+	}
+	gameWmCacheMu.Lock()
+	gameWmCache[key] = game
+	gameWmCacheMu.Unlock()
+	return game
+}
+
 func getFocusedPID(wmClass string) int {
 	if isGnome {
 		pid, err := gnomeGetFocusPID()

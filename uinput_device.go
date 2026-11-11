@@ -84,7 +84,19 @@ static void uio_backspace_batch(int fd, int n) {
 	}
 }
 
+// Select n characters left of the caret: Shift down, n x Left tap, Shift up.
+static void uio_select_left_batch(int fd, int n) {
+	uio_key(fd, KEY_LEFTSHIFT, 1);
+	usleep(1000);
+	for (int i = 0; i < n; i++) {
+		uio_tap(fd, KEY_LEFT);
+		usleep(1000);
+	}
+	uio_key(fd, KEY_LEFTSHIFT, 0);
+}
+
 static void uio_release_all(int fd) {
+	uio_key(fd, KEY_LEFT, 0);
 	uio_key(fd, KEY_BACKSPACE, 0);
 	uio_key(fd, KEY_LEFTCTRL, 0);
 	uio_key(fd, KEY_LEFTSHIFT, 0);
@@ -189,8 +201,8 @@ import (
 
 var (
 	uinputFd   C.int = -1
-	uinputOnce  sync.Once
-	uinputDmu   sync.Mutex
+	uinputOnce sync.Once
+	uinputDmu  sync.Mutex
 )
 
 func uinputDeviceOpen() (C.int, error) {
@@ -205,7 +217,7 @@ func uinputDeviceOpen() (C.int, error) {
 	}
 	needKeys := []C.int{
 		C.KEY_BACKSPACE, C.KEY_LEFTCTRL, C.KEY_LEFTSHIFT, C.KEY_U,
-		C.KEY_ENTER, C.KEY_SPACE, C.KEY_ESC,
+		C.KEY_ENTER, C.KEY_SPACE, C.KEY_ESC, C.KEY_LEFT, C.KEY_RIGHT,
 	}
 	for _, k := range needKeys {
 		if C.uio_set_keybit(fd, k) < 0 {
@@ -253,12 +265,14 @@ func uinputDirectTap(code int) {
 	}
 }
 
-func uinputDirectBackspace(n int) {
-	log.Printf("[uinput] DIRECT_BS n=%d", n)
+// uinputDirectBackspace returns false when the in-process device is not
+// open (the caller then falls back to the socket server).
+func uinputDirectBackspace(n int) bool {
+	debugf("[uinput] DIRECT_BS n=%d", n)
 	uinputDmu.Lock()
 	defer uinputDmu.Unlock()
 	if uinputFd < 0 {
-		return
+		return false
 	}
 	defer func() {
 		// Fail-safe: guarantee KEY_BACKSPACE release event is always posted
@@ -268,6 +282,24 @@ func uinputDirectBackspace(n int) {
 	// in a single write() call, eliminating any prolonged hold state where
 	// compositor autorepeat could latch.
 	C.uio_backspace_batch(uinputFd, C.int(n))
+	return true
+}
+
+// uinputDirectSelectLeft selects n characters with Shift+Left. Returns false
+// when the in-process device is not available (socket fallback cannot do it).
+func uinputDirectSelectLeft(n int) bool {
+	uinputDmu.Lock()
+	defer uinputDmu.Unlock()
+	if uinputFd < 0 {
+		return false
+	}
+	debugf("[uinput] DIRECT_SELECT_LEFT n=%d", n)
+	defer func() {
+		C.uio_key(uinputFd, C.KEY_LEFT, 0)
+		C.uio_key(uinputFd, C.KEY_LEFTSHIFT, 0)
+	}()
+	C.uio_select_left_batch(uinputFd, C.int(n))
+	return true
 }
 
 func uinputReleaseAll() {
@@ -290,16 +322,30 @@ func isPhysicalBackspaceDown() bool {
 	return C.uio_is_physical_backspace_down() != 0
 }
 
+// uinputTryOpenDirect opens the in-process virtual keyboard.
+func uinputTryOpenDirect() bool {
+	fd, err := uinputDeviceOpen()
+	if err != nil {
+		log.Printf("[uinput] direct open failed: %v", err)
+		return false
+	}
+	uinputDmu.Lock()
+	uinputFd = fd
+	uinputDmu.Unlock()
+	log.Printf("[uinput] direct device opened (fd=%d)", int(fd))
+	return true
+}
+
+// uinputInitDirect opens the device; when that fails (at boot /dev/uinput
+// may get its ACL only after the session starts) it uses the socket server
+// meanwhile and keeps retrying in the background.
 func uinputInitDirect() {
 	uinputOnce.Do(func() {
-		fd, err := uinputDeviceOpen()
-		if err != nil {
-			log.Printf("[uinput] direct open failed: %v (falling back to socket)", err)
-			uinputFd = -1
-			uinputInit() // fallback to socket-based
+		if uinputTryOpenDirect() {
 			return
 		}
-		uinputFd = fd
-		log.Printf("[uinput] direct device opened (fd=%d)", int(fd))
+		uinputInit() // socket fallback while retrying
+		go uinputOpenLoop(uinputTryOpenDirect, uinputNotifyUnavailable, uinputKick,
+			kUinputRetryBase, kUinputRetryMax, nil)
 	})
 }

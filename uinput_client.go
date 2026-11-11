@@ -29,10 +29,10 @@ func uinputSendRaw(buf []byte) {
 // uinputBackspace sends n backspace keystrokes via uinput.
 // Uses direct fd if available (in-process), otherwise falls back to socket.
 func uinputBackspace(n int) {
-	if uinputFd >= 0 {
-		uinputDirectBackspace(n)
+	if uinputDirectBackspace(n) {
 		return
 	}
+	uinputRequestRetry()
 	uinputReplace(n, "")
 }
 

@@ -21,8 +21,9 @@ package main
 
 import (
 	"fmt"
-	"ktelex/config"
 	"io/ioutil"
+	"ktelex/config"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -56,6 +57,7 @@ func GetIBusEngineCreator() func(*dbus.Conn, string) dbus.ObjectPath {
 		baseEngine := ibus.BaseEngine(conn, objectPath)
 		var engine = NewIbusBambooEngine(engineName, cfg, &baseEngine, bamboo.NewEngine(inputMethod, cfg.Flags))
 		engine.propList = GetPropListByConfig(cfg)
+		engine.configMtime_ = configFilesMtime(engineName)
 		engine.shouldEnqueuKeyStrokes = true
 		ibus.PublishEngine(conn, objectPath, engine)
 		engine.init()
@@ -83,14 +85,16 @@ func (e *Engine) init() {
 			e.macroTable.Enable(e.engineName)
 		}
 	}
-	keyPressHandler = e.keyPressForwardHandler
 }
 
+// initConfigFiles creates the config dir and a sample macro file. Failures
+// are logged, not fatal: a panic here (missing data file, read-only home)
+// would kill engine creation and leave the user with no input method.
 func initConfigFiles(engineName string) {
 	if sta, err := os.Stat(config.GetConfigDir(engineName)); err != nil || !sta.IsDir() {
-		err = os.Mkdir(config.GetConfigDir(engineName), 0777)
-		if err != nil {
-			panic(err)
+		if err = os.MkdirAll(config.GetConfigDir(engineName), 0755); err != nil {
+			log.Printf("config dir: %v", err)
+			return
 		}
 	}
 	macroPath := config.GetMacroPath(engineName)
@@ -98,26 +102,31 @@ func initConfigFiles(engineName string) {
 		sampleFile := getEngineSubFile(sampleMactabFile)
 		sample, err := ioutil.ReadFile(sampleFile)
 		if err != nil {
-			panic(err)
+			log.Printf("macro sample: %v", err)
+			return
 		}
-		err = ioutil.WriteFile(macroPath, sample, 0644)
-		if err != nil {
-			panic(err)
+		if err = ioutil.WriteFile(macroPath, sample, 0644); err != nil {
+			log.Printf("macro file: %v", err)
 		}
 	}
 }
 
-var keyPressHandler = func(keyVal, keyCode, state uint32) {}
-var keyPressChan = make(chan [3]uint32, 100)
+// keyPressEvent is a key queued by the Surrounding-text mode. It carries
+// its engine: a process-wide handler used to be overwritten by whichever
+// engine was created last (the EN engine at login), so the VI engine's keys
+// ran through the EN engine's logic and config.
+type keyPressEvent struct {
+	e                      *Engine
+	keyVal, keyCode, state uint32
+}
+
+var keyPressChan = make(chan keyPressEvent, 100)
 var lenKeyChan int32
 
 func keyPressCapturing() {
-	for keyEvents := range keyPressChan {
+	for ev := range keyPressChan {
 		atomic.StoreInt32(&lenKeyChan, int32(len(keyPressChan)))
-
-		var keyVal, keyCode, state = keyEvents[0], keyEvents[1], keyEvents[2]
-		keyPressHandler(keyVal, keyCode, state)
-
+		ev.e.keyPressForwardHandler(ev.keyVal, ev.keyCode, ev.state)
 		atomic.AddInt32(&lenKeyChan, -1)
 	}
 }
@@ -297,10 +306,11 @@ func isJetBrainsApp(wm string) bool {
 	return false
 }
 
-func (e *Engine) getInputMode() int {
+// computeInputMode resolves the input mode for wm (see getInputMode for the
+// cached entry point).
+func (e *Engine) computeInputMode(wm string) int {
 	var im int
-	if e.respectAppMapping && e.getWmClass() != "" {
-		wm := e.getWmClass()
+	if e.respectAppMapping && wm != "" {
 		if stored, ok := e.config.InputModeMapping[wm]; ok {
 			im = migrateInputMode(stored)
 			if _, ok := config.ImLookupTable[im]; ok {
@@ -430,14 +440,23 @@ func (e *Engine) commitInputModeCandidate() {
 		return
 	}
 	var im = modes[cursorPos]
+	if e.config.InputModeMapping == nil {
+		e.config.InputModeMapping = map[string]int{}
+	}
 	e.config.InputModeMapping[e.getWmClass()] = im
+	e.bumpConfigGen()
 
 	// Always persist mappings to the master (VI) config so both engines
-	// share per-app input mode settings.
+	// share per-app input mode settings (the VI engine picks the file
+	// change up on its next FocusIn).
 	master := config.MasterName(e.engineName)
 	masterCfg := config.LoadConfig(master)
+	if masterCfg.InputModeMapping == nil {
+		masterCfg.InputModeMapping = map[string]int{}
+	}
 	masterCfg.InputModeMapping[e.getWmClass()] = im
 	config.SaveConfig(masterCfg, master)
+	e.configMtime_ = configFilesMtime(e.engineName)
 
 	e.propList = GetPropListByConfig(e.config)
 	e.RegisterProperties(e.propList)
@@ -636,14 +655,23 @@ func notify(enMode bool) {
 		title = "English"
 		msg = "Press Shortcut keys to switch input language"
 	}
+	notifyDesktopID(281025, title, msg, 3000)
+}
+
+// notifyDesktop shows a longer-lived desktop notification.
+func notifyDesktop(title, msg string) {
+	notifyDesktopID(0, title, msg, 10000)
+}
+
+func notifyDesktopID(replaceID uint32, title, msg string, timeoutMs int32) {
 	conn, err := dbus.SessionBus()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	obj := conn.Object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
-	call := obj.Call("org.freedesktop.Notifications.Notify", 0, "", uint32(281025),
-		"", title, msg, []string{}, map[string]dbus.Variant{}, int32(3000))
+	call := obj.Call("org.freedesktop.Notifications.Notify", 0, "ktelex", replaceID,
+		"", title, msg, []string{}, map[string]dbus.Variant{}, timeoutMs)
 	if call.Err != nil {
 		fmt.Println(call.Err)
 	}

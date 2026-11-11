@@ -159,7 +159,6 @@ fi
 # Cấp ACL tạm thời cho user ngay trong phiên hiện tại để có thể dev ngay không cần relogin
 if command -v setfacl >/dev/null 2>&1 && [ -e /dev/uinput ]; then
     run_sudo setfacl -m "u:${CURRENT_USER}:rw" /dev/uinput 2>/dev/null || true
-    run_sudo chmod 0666 /dev/uinput 2>/dev/null || true
 fi
 
 # 4. Kiểm tra Go dependencies trong dự án

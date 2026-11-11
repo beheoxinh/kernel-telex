@@ -6,7 +6,8 @@ engine_gui_name="ibus-setup-KTelex.desktop"
 PREFIX="${1:-/usr}"
 DESTDIR="${2:-}"
 
-engine_dir="${DESTDIR}${PREFIX}/share/${pkg_name}"
+# The engine reads its data from DataDir (utils.go: /usr/share/ktelex).
+engine_dir="${DESTDIR}${PREFIX}/share/${engine_name}"
 ibus_lib_dir="${DESTDIR}${PREFIX}/libexec"
 ibus_component_dir="${DESTDIR}${PREFIX}/share/ibus/component"
 apps_dir="${DESTDIR}${PREFIX}/share/applications"

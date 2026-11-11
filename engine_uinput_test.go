@@ -19,6 +19,7 @@ import (
 func newUinputEchoEngine(t *testing.T) (*Engine, *fakeEngine) {
 	t.Helper()
 	fe := NewFakeEngine()
+	resetEchoProfile("") // windows without WM_CLASS share one profile
 	engineName := "test-uinput"
 	cfg := config.DefaultCfg(engineName)
 	cfg.DefaultInputMode = config.UinputIM
@@ -347,7 +348,7 @@ func TestUinputEchoMatrix(t *testing.T) {
 		fe := NewFakeEngine()
 		engineName := "test-jetbrains-auto"
 		cfg := config.DefaultCfg(engineName)
-		cfg.DefaultInputMode = config.UinputIM // default is UinputIM
+		cfg.DefaultInputMode = config.UinputIM  // default is UinputIM
 		cfg.InputModeMapping = map[string]int{} // empty custom mapping
 		inputMethod := bamboo.ParseInputMethod(cfg.InputMethodDefinitions, cfg.InputMethod)
 		e := NewIbusBambooEngine(engineName, &cfg, fe, bamboo.NewEngine(inputMethod, cfg.Flags))

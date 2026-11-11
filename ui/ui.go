@@ -10,8 +10,8 @@ import "C"
 
 import (
 	"fmt"
-	"ktelex/config"
 	"io/ioutil"
+	"ktelex/config"
 	"unsafe"
 
 	"github.com/BambooEngine/bamboo-core"
@@ -161,21 +161,25 @@ func OpenGUI(engName string, version string, buildId string) {
 	ib := cfg.IBflags
 	extra := fmt.Sprintf("%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|",
 		cfg.InputMethod, cfg.OutputCharset, cfg.Flags,
-		(ib>>1)&1,   // macro_enabled (bit 1)
-		(ib>>18)&1,  // auto_capitalize (existing convention: bit 18)
-		(ib>>4)&1,   // spell_check (bit 4)
-		(ib>>8)&1,   // spell_rules (bit 8)
-		(ib>>9)&1,   // spell_dicts (bit 9)
-		(ib>>10)&1,  // preedit_elimination (bit 10)
-		(ib>>21)&1,  // disable_on_game (bit 21)
+		(ib>>1)&1,  // macro_enabled (bit 1)
+		(ib>>18)&1, // auto_capitalize (existing convention: bit 18)
+		(ib>>4)&1,  // spell_check (bit 4)
+		(ib>>8)&1,  // spell_rules (bit 8)
+		(ib>>9)&1,  // spell_dicts (bit 9)
+		(ib>>10)&1, // preedit_elimination (bit 10)
+		(ib>>21)&1, // disable_on_game (bit 21)
 	)
 	var imList, csList string
 	for name := range cfg.InputMethodDefinitions {
-		if imList != "" { imList += ";" }
+		if imList != "" {
+			imList += ";"
+		}
 		imList += name
 	}
 	for _, name := range bamboo.GetCharsetNames() {
-		if csList != "" { csList += ";" }
+		if csList != "" {
+			csList += ";"
+		}
 		csList += name
 	}
 	extra += imList + "|" + csList

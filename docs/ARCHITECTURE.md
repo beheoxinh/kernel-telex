@@ -236,8 +236,18 @@ main goroutine
 
 ### 3.2. Vấn đề đồng bộ (Concurrency concerns)
 
-| Shared state | Loại | Đồng bộ? | Rủi ro |
-|-------------|------|----------|--------|
+| Shared state | Đồng bộ | Ghi chú |
+|-------------|---------|---------|
+| Thứ tự phím | `keyorder.go` (ticket theo thứ tự đến của D-Bus, chờ tối đa 40ms) | `ProcessKeyEvent` xử lý tuần tự đúng thứ tự gõ |
+| `keyPressChan` | channel `keyPressEvent{e, keyVal, keyCode, state}` | Mỗi event mang engine của nó (không còn global `keyPressHandler`) |
+| Engine.uinput* | `Engine.Mutex` | Timer/watchdog cũng giữ mutex; nhả quanh I/O |
+| Preeditor ở PreeditIM | `Engine.preeditMu` | Phím vs. `Reset`/`FocusOut` (các goroutine D-Bus khác nhau) |
+| Input-mode cache | `imCacheMu`, key {wm, isGame, configGen} | `bumpConfigGen()` khi đổi config |
+| Config | `reloadConfigIfChanged()` ở FocusIn (theo mtime) | GUI chạy subprocess `--gui`, không chặn D-Bus |
+| `uinputFd` | `uinputDmu` + `uinputOpenLoop` (retry 1s→60s, có kick) | Thông báo desktop sau 3 lần mở thất bại |
+| Echo profile theo app | mutex toàn cục | WM class rỗng dùng key `"\x00no-wm-class"` |
+
+-------------|------|----------|--------|
 | `keyPressHandler` (global func) | write-once (init), read-many | ❌ Không | Multiple engines overwrite nhau |
 | `keyPressChan` | chan [3]uint32 | ✅ Thread-safe (channel) | Full buffer → deadlock (xem mục 4.3) |
 | `wlAppId` (global string) | write (wl goroutine), read (FocusIn) | ❌ Không | Data race |
@@ -659,6 +669,27 @@ Chromium Wayland. Thay bằng stray-BS guard ở §7.4.
 `computeUinputCommitDelay` / `kUinputBsFixedDelayMs` đã bị xóa. Commit timing
 hiện tại: `clamp(EWMA_RT, 20ms, 80ms)` — bounded, thích ứng theo app.
 
+
+### 7.7. Trạng thái hiện tại (2026-11)
+
+Phần này thay cho các con số trong §7.4 khi có khác biệt.
+
+- **Watchdog thích ứng theo app:** mỗi WM class có echo profile
+  `{seen, missStreak, samples, srtt, rttvar}`. Thời gian chờ là
+  `srtt + 4·rttvar + 40ms`, kẹp trong [120ms, 400ms] sau 4 mẫu. App chưa
+  biết: 150ms. Trượt echo 3 lần liên tiếp → học lại từ đầu.
+- **Shift+Left thay cho Backspace:** chỉ khi thay cả âm tiết (pfx == 0) và
+  app nằm trong `uinputSelectApps` (mặc định: họ Chromium + Electron; token
+  `"@default"` giữ danh sách mặc định khi người dùng thêm app). Ô không bao
+  giờ trống, nên Gemini/ô chat không đổi trạng thái giữa chừng.
+- **Gợi ý tự hoàn thành (inline completion):** thanh địa chỉ/thanh search
+  của trình duyệt chọn sẵn phần gợi ý sau mỗi ký tự. Backspace hay Shift+Left
+  đầu tiên chỉ xoá phần gợi ý, nên trước đây "dd" ra "dđ". Cách xử lý: commit
+  `" "` trước (thay phần gợi ý), rồi xoá thêm 1. Áp dụng khi: purpose URL,
+  surrounding text báo vùng chọn ngay sau âm tiết, hoặc WM class thuộc
+  `config.DefaultUinputCompletionApps` (Chromium, Firefox và các bản fork).
+- **Disable giữa transaction:** commit phần thay thế đang chờ ngay, không để
+  watchdog cũ commit lần hai.
 
 ## 8. Macro Engine & Spell Check
 

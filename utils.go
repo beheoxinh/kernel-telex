@@ -36,7 +36,7 @@ const (
 	VnCaseNoChange
 )
 const (
-	HomePage          = "https://github.com/BambooEngine/ibus-bamboo"
+	HomePage = "https://github.com/BambooEngine/ibus-bamboo"
 
 	DataDir          = "/usr/share/ktelex"
 	DictVietnameseCm = "data/vietnamese.cm.dict"
@@ -205,5 +205,3 @@ func isMovementKey(keyVal uint32) bool {
 	}
 	return false
 }
-
-

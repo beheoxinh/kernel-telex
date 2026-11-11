@@ -106,10 +106,14 @@ fi
 
 # Đảm bảo quyền truy cập ngay lập tức cho user hiện tại
 if [ -e /dev/uinput ]; then
-    if command -v setfacl >/dev/null 2>&1; then
-        run_sudo setfacl -m "u:${CURRENT_USER}:rw" /dev/uinput 2>/dev/null || true
+    # Grant only the current user (never 0666: a world-writable uinput lets
+    # any local process inject keystrokes into every session).
+    if command -v setfacl >/dev/null 2>&1 && run_sudo setfacl -m "u:${CURRENT_USER}:rw" /dev/uinput 2>/dev/null; then
+        :
+    else
+        run_sudo chgrp input /dev/uinput 2>/dev/null || true
+        run_sudo chmod 0660 /dev/uinput 2>/dev/null || true
     fi
-    run_sudo chmod 0666 /dev/uinput 2>/dev/null || true
 fi
 
 # 6. Cập nhật cache desktop & icon

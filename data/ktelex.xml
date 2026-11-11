@@ -17,6 +17,7 @@
       <license>GPL</license>
       <author>Luong Thanh Lam &lt;ltlam93@gmail.com&gt;</author>
       <icon>/usr/share/ktelex/icons/vi.svg</icon>
+      <setup>/usr/libexec/ibus-engine-ktelex --gui</setup>
       <layout>default</layout>
       <symbol>VI</symbol>
       <rank>0</rank>

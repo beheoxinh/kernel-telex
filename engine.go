@@ -33,55 +33,69 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"ktelex/config"
-	"ktelex/ui"
 )
 
 type Engine struct {
 	sync.Mutex
 	IEngine
-	preeditor              bamboo.IEngine
-	engineName             string
-	config                 *config.Config
-	propList               *ibus.PropList
-	respectAppMapping      bool   // EN engine ignores per-app InputModeMapping
-	englishMode            bool
-	macroTable             *MacroTable
-	wmClasses              string
-	isInputModeLTOpened    bool
-	isEmojiLTOpened        bool
-	emojiLookupTable       *ibus.LookupTable
-	inputModeLookupTable   *ibus.LookupTable
-	capabilities           uint32
-	keyPressDelay          int
-	isFirstTimeSendingBS   bool
+	preeditor            bamboo.IEngine
+	engineName           string
+	config               *config.Config
+	propList             *ibus.PropList
+	respectAppMapping    bool // EN engine ignores per-app InputModeMapping
+	englishMode          bool
+	macroTable           *MacroTable
+	wmClasses            string
+	isInputModeLTOpened  bool
+	isEmojiLTOpened      bool
+	emojiLookupTable     *ibus.LookupTable
+	inputModeLookupTable *ibus.LookupTable
+	capabilities         uint32
+	keyPressDelay        int
+	isFirstTimeSendingBS bool
 	// Uinput BS counting + deferred commit (mirrors skey's approach)
-	uinputDeleting_         bool    // true while waiting for BS echoes
-	uinputExpectingBs_      int     // BS echoes we're waiting for
-	uinputSeenBs_           int     // BS echoes counted so far
-	uinputOwedBs_           int     // BS echoes still owed when tx completed early (debt counter)
-	uinputOwedExpiresAt_    time.Time // expiry for owed BS echo debt
-	uinputPendingCommit_    string  // text to commit after all BS done
-	uinputDeferredKeys_     []uint32 // buffered key vals during pending BS
-	uinputDeferredCodes_    []uint32 // buffered key codes
-	uinputDeferredStates_   []uint32 // buffered key states
+	uinputDeleting_         bool        // true while waiting for BS echoes
+	uinputExpectingBs_      int         // BS echoes we're waiting for
+	uinputSeenBs_           int         // BS echoes counted so far
+	uinputOwedBs_           int         // BS echoes still owed when tx completed early (debt counter)
+	uinputOwedExpiresAt_    time.Time   // expiry for owed BS echo debt
+	uinputPendingCommit_    string      // text to commit after all BS done
+	uinputDeferredKeys_     []uint32    // buffered key vals during pending BS
+	uinputDeferredCodes_    []uint32    // buffered key codes
+	uinputDeferredStates_   []uint32    // buffered key states
 	uinputCommitTimer_      *time.Timer // async commit timer (skey-style)
-	uinputBsSentAt_         time.Time // when BS was sent via uinput (for EWMA)
-	uinputBsRtEwmaUsec_     int64     // EWMA of BS round-trip in µs
-	uinputNoEcho_           bool      // true: current app doesn't echo BS through IBus
-	uinputLastWm_           string    // wmClass that "owns" the current preedit
-	uinputTxID_             uint64    // generation counter for the active transaction
-	uinputTxEndAt_          time.Time // when the last transaction ended (stray-BS guard window)
-	uinputLastIdleBsAt_     time.Time // timestamp of last idle backspace received
-	uinputIdleBsBurstCount_ int       // consecutive rapid backspaces received while idle (runaway guard)
-	emoji                  *EmojiEngine
-	isSurroundingTextReady bool
-	lastKeyWithShift       bool
-	lastCommitText         int64
+	uinputBsSentAt_         time.Time   // when BS was sent via uinput (for EWMA)
+	uinputBsRtEwmaUsec_     int64       // EWMA of BS round-trip in µs
+	uinputOwedKey_          uint32      // keyval of the owed echoes (Backspace or Left)
+	uinputTxWm_             string      // app the active transaction was opened in
+	uinputTxSelect_         bool        // active tx removes text via Shift+Left selection
+	uinputFocused_          bool        // text input currently focused (FocusIn/FocusOut)
+	uinputFocusOutAt_       time.Time   // last FocusOut
+	uinputAwaitFocus_       bool        // commit is held until focus returns
+	uinputLastKeyAt_        time.Time   // last real key event in UinputIM
+	uinputLastWm_           string      // wmClass that "owns" the current preedit
+	uinputTxID_             uint64      // generation counter for the active transaction
+	uinputTxEndAt_          time.Time   // when the last transaction ended (stray-BS guard window)
+	uinputLastIdleBsAt_     time.Time   // timestamp of last idle backspace received
+	uinputIdleBsBurstCount_ int         // consecutive rapid backspaces received while idle (runaway guard)
+	emoji                   *EmojiEngine
+	isSurroundingTextReady  bool
+	lastKeyWithShift        bool
+	lastCommitText          int64
 	// restore key strokes by pressing Shift + Space
 	shouldRestoreKeyStrokes bool
 	// enqueue key strokes to process later
-	shouldEnqueuKeyStrokes bool
-	isGame                 bool // cached: current focused app is a game
+	shouldEnqueuKeyStrokes  bool
+	isGame                  bool         // cached: current focused app is a game
+	inputPurpose_           uint32       // IBusInputPurpose of the focused field (guarded by Mutex)
+	uinputSurroundSeen_     bool         // client sent usable surrounding text since FocusIn (UinputIM)
+	uinputInlineCompletion_ bool         // focused field showed an inline completion (surrounding text)
+	configMtime_            time.Time    // newest mtime of the config files when last loaded
+	configGen_              uint64       // bumped on every config change (atomic)
+	imCacheMu               sync.Mutex   // guards imCache
+	preeditMu               sync.Mutex   // serialises Preedit-mode keys vs. Reset/FocusOut
+	imCache                 inputModeKey // last getInputMode() inputs
+	imCacheMode             int          // and its result
 }
 
 func NewIbusBambooEngine(name string, cfg *config.Config, base IEngine, preeditor bamboo.IEngine) *Engine {
@@ -117,8 +131,14 @@ func (e *Engine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (b
 	if state&IBusReleaseMask != 0 {
 		return false, nil
 	}
-	fmt.Printf("\n")
-	log.Printf(">>>>ProcessKeyEvent >  %d | state %d keyVal 0x%04x | %c <<<<\n", len(keyPressChan), state, keyVal, rune(keyVal))
+	ticket := keyOrder.acquire(keyTriple{keyVal, keyCode, state})
+	defer keyOrder.release(ticket)
+
+	// Password/PIN fields: never transform, inject or log anything.
+	if e.isSecretInput() {
+		return false, nil
+	}
+	debugf(">>>>ProcessKeyEvent > %d | state %d keyVal 0x%04x | %c", len(keyPressChan), state, keyVal, rune(keyVal))
 
 	// EN engine: pure passthrough. Only Alt+Z opens popup to configure VI engine.
 	if e.engineName == "ktelexus" || e.engineName == "ktelexgb" {
@@ -160,73 +180,56 @@ func (e *Engine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (b
 	if e.checkInputMode(config.UinputIM) {
 		return e.uinputProcessKeyEvent(keyVal, keyCode, state)
 	}
+	e.preeditMu.Lock()
+	defer e.preeditMu.Unlock()
 	return e.preeditProcessKeyEvent(keyVal, keyCode, state)
 }
 
 func (e *Engine) FocusIn() *dbus.Error {
-	// T9: a fresh focus never inherits a half-open tx — end it first so a
-	// stale fallback timer cannot commit into the new context.
-	e.Lock()
-	if e.checkInputMode(config.UinputIM) && (e.uinputDeleting_ || e.uinputPendingCommit_ != "") {
-		if e.uinputCommitTimer_ != nil {
-			e.uinputCommitTimer_.Stop()
-			e.uinputCommitTimer_ = nil
-		}
-		e.uinputEndTxLocked(e.uinputTxID_, "focusin")
-	}
-	e.Unlock()
+	noteEngineActive(e.engineName)
+	e.reloadConfigIfChanged()
 	var latestWm = e.getLatestWmClass()
-	log.Printf("FocusIn: %s (IBflags=%d bit21=%d)", latestWm, e.config.IBflags, (e.config.IBflags>>21)&1)
+	debugf("FocusIn: %s", latestWm)
+	// A focus flap inside the same app must not end an open transaction:
+	// committing now would overtake the deletion still queued in the
+	// compositor. See uinputOnFocusIn.
+	if e.checkInputMode(config.UinputIM) {
+		e.uinputOnFocusIn(latestWm)
+	}
 	e.checkWmClass(latestWm)
 	if e.config.IBflags&config.IBdisableOnGame != 0 {
-		if isGameByWmClass(latestWm) {
-			e.isGame = true
-			log.Printf("[gameDetect] input disabled by WM_CLASS %q", latestWm)
-		} else {
-			pid := getFocusedPID(latestWm)
-			e.isGame = isGameProcess(pid)
-			if e.isGame {
-				log.Printf("[gameDetect] input disabled for PID %d (%s)", pid, latestWm)
-			} else {
-				log.Printf("[gameDetect] PID %d (%s) not a game", pid, latestWm)
-			}
+		// Empty WM_CLASS shows up on transient flaps: keep the last verdict.
+		if latestWm != "" {
+			e.isGame = isGameWindow(latestWm)
 		}
 	} else {
 		e.isGame = false
 	}
 	e.RegisterProperties(e.propList)
 	e.RequireSurroundingText()
-	if e.isShortcutKeyEnable(KSEmojiDialog) && emojiTrie != nil && len(emojiTrie.Children) == 0 {
-		var err error
-		emojiTrie, err = loadEmojiOne(DictEmojiOne)
-		if err != nil {
-			panic(fmt.Sprintf("failed to load emojiTrie from %s: %s", DictEmojiOne, err))
-		}
+	if e.isShortcutKeyEnable(KSEmojiDialog) {
+		ensureEmojiTrie()
 	}
-	if e.config.IBflags&config.IBspellCheckWithDicts != 0 && len(dictionary) == 0 {
-		dictionary, _ = loadDictionary(DictVietnameseCm)
+	if e.config.IBflags&config.IBspellCheckWithDicts != 0 {
+		ensureDictionary()
 	}
-	fmt.Printf("WM_CLASS=(%s)\n", e.getWmClass())
 	return nil
 }
 
 func (e *Engine) FocusOut() *dbus.Error {
-	log.Print("FocusOut.")
+	debugf("FocusOut.")
 	if e.checkInputMode(config.UinputIM) {
-		// In UinputIM, browsers (Thorium, Chromium, Electron) frequently flap FocusOut/FocusIn
-		// on Backspace injection and DOM edits.
-		// We do NOT reset preeditor or wipe uinputLastWm_ here because doing so splits syllables
-		// mid-word (e.g. "tiê" -> reset -> "ngs" -> "tiêngs").
-		// If the user actually switches apps, the switch is caught by checkWmClass/uinputProcessKeyEvent
-		// or FocusIn on the new window.
-		// If a transaction is actively deleting or pending commit, we let the timer/echo complete normally.
-		// Ensure all virtual input keys are released to prevent compositor autorepeat latches
-		uinputReleaseAll()
+		// Browsers/Electron flap FocusOut/FocusIn on DOM edits: keep the
+		// syllable and any open transaction (FocusIn decides), only record
+		// the focus state so a commit is not sent into an unfocused input.
+		e.uinputOnFocusOut()
 		return nil
 	}
 	// Commit pending preedit to the losing window now (Bamboo PR #611);
 	// otherwise the uncommitted composing text is dropped or leaks into the next window.
+	e.preeditMu.Lock()
 	e.resetBuffer()
+	e.preeditMu.Unlock()
 	if e.isEmojiLTOpened {
 		e.closeEmojiCandidates()
 	}
@@ -237,15 +240,20 @@ func (e *Engine) FocusOut() *dbus.Error {
 }
 
 func (e *Engine) Reset() *dbus.Error {
-	fmt.Print("Reset.\n")
+	debugf("Reset.")
 	if e.checkInputMode(config.PreeditIM) {
+		e.preeditMu.Lock()
 		e.preeditor.Reset()
+		e.preeditMu.Unlock()
+	} else if e.checkInputMode(config.UinputIM) {
+		e.uinputOnReset()
 	}
 	return nil
 }
 
 func (e *Engine) Enable() *dbus.Error {
-	fmt.Print("Enable.\n")
+	log.Printf("Enable %s", e.engineName)
+	noteEngineActive(e.engineName)
 	e.preeditor.Reset()
 	e.RequireSurroundingText()
 	return nil
@@ -254,25 +262,29 @@ func (e *Engine) Enable() *dbus.Error {
 func (e *Engine) Disable() *dbus.Error {
 	fmt.Print("Disable.\n")
 	e.Lock()
-	if e.uinputCommitTimer_ != nil {
-		e.uinputCommitTimer_.Stop()
-		e.uinputCommitTimer_ = nil
+	// Switching away mid-transaction: the deletion is already on its way,
+	// so commit the replacement now rather than leaving the word truncated.
+	pending := ""
+	if e.uinputDeleting_ {
+		pending = e.uinputPendingCommit_
 	}
-	e.uinputExpectingBs_ = 0
-	e.uinputSeenBs_ = 0
-	e.uinputDeleting_ = false
-	e.uinputPendingCommit_ = ""
-	e.uinputDeferredKeys_ = nil
-	e.uinputDeferredCodes_ = nil
-	e.uinputDeferredStates_ = nil
-	e.uinputNoEcho_ = false
-	e.Unlock()
+	e.uinputResetTxStateLocked()
+	if pending != "" {
+		e.commitText(pending)
+	}
 	e.preeditor.Reset()
+	e.Unlock()
 	return nil
 }
 
 // @method(in_signature="vuu")
 func (e *Engine) SetSurroundingText(text dbus.Variant, cursorPos uint32, anchorPos uint32) *dbus.Error {
+	if e.checkInputMode(config.UinputIM) {
+		if s, ok := ibusTextString(text); ok {
+			e.uinputOnSurroundingText(s, cursorPos, anchorPos)
+		}
+		return nil
+	}
 	if !e.isSurroundingTextReady {
 		//fmt.Println("Surrounding Text is not ready yet.")
 		return nil
@@ -292,7 +304,7 @@ func (e *Engine) SetSurroundingText(text dbus.Variant, cursorPos uint32, anchorP
 			return nil
 		}
 		var cs = s[:cursorPos]
-		fmt.Println("Surrounding Text: ", string(cs))
+		debugf("Surrounding Text: %q", string(cs))
 		e.preeditor.Reset()
 		for i := len(cs) - 1; i >= 0; i-- {
 			// workaround for spell checking
@@ -366,8 +378,31 @@ func (e *Engine) SetCursorLocation(x int32, y int32, w int32, h int32) *dbus.Err
 	return nil
 }
 
+// IBusInputPurpose values (ibustypes.h).
+const (
+	ibusPurposeUrl      = 5
+	ibusPurposePassword = 8
+	ibusPurposePin      = 9
+)
+
 func (e *Engine) SetContentType(purpose uint32, hints uint32) *dbus.Error {
+	e.Lock()
+	wasSecret := e.inputPurpose_ == ibusPurposePassword || e.inputPurpose_ == ibusPurposePin
+	e.inputPurpose_ = purpose
+	isSecret := purpose == ibusPurposePassword || purpose == ibusPurposePin
+	if isSecret && !wasSecret {
+		// Entering a password field: drop the syllable typed elsewhere.
+		e.uinputResetTxStateLocked()
+		e.preeditor.Reset()
+	}
+	e.Unlock()
 	return nil
+}
+
+func (e *Engine) isSecretInput() bool {
+	e.Lock()
+	defer e.Unlock()
+	return e.inputPurpose_ == ibusPurposePassword || e.inputPurpose_ == ibusPurposePin
 }
 
 // @method(in_signature="su")
@@ -376,24 +411,18 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 		exec.Command("xdg-open", HomePage).Start()
 		return nil
 	}
-	if propName == PropKeyConfiguration {
-		ui.OpenGUI(e.engineName, Version, BuildId)
-		e.config = config.LoadConfig(e.engineName)
-		e.FocusOut()
-		e.FocusIn()
+	if propName == PropKeyConfiguration || propName == PropKeyInputModeLookupTableShortcut || propName == PropKeyMacroTable {
+		// Non-blocking: the window lives in its own process; the saved
+		// config is picked up when it closes.
+		openSettingsAsync(func() { e.reloadConfigIfChanged() })
+		return nil
 	}
-	if propName == PropKeyInputModeLookupTableShortcut {
-		ui.OpenGUI(e.engineName, Version, BuildId)
-		e.config = config.LoadConfig(e.engineName)
-		e.FocusOut()
-		e.FocusIn()
-	}
-	if propName == PropKeyMacroTable {
-		ui.OpenGUI(e.engineName, Version, BuildId)
-		e.config = config.LoadConfig(e.engineName)
-		e.FocusOut()
-		e.FocusIn()
-	}
+
+	// Key handling, transaction timers and FocusIn reloads all touch
+	// config and preeditor: change them under the engine lock.
+	e.Lock()
+	defer e.Unlock()
+	oldInputMethod, oldFlags := e.config.InputMethod, e.config.Flags
 
 	turnSpellChecking := func(on bool) {
 		if on {
@@ -443,7 +472,7 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 			e.config.IBflags |= config.IBspellCheckWithDicts
 			e.config.IBflags &= ^config.IBspellCheckWithRules
 			turnSpellChecking(true)
-			dictionary, _ = loadDictionary(DictVietnameseCm)
+			ensureDictionary()
 		} else {
 			e.config.IBflags &= ^config.IBspellCheckWithDicts
 		}
@@ -503,12 +532,17 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 	}
 	e.propList = GetPropListByConfig(e.config)
 
-	var inputMethod = bamboo.ParseInputMethod(e.config.InputMethodDefinitions, e.config.InputMethod)
-	if inputMethod.Name == "" {
-		inputMethod = bamboo.ParseInputMethod(e.config.InputMethodDefinitions, bamboo.DefaultInputMethodName)
-		e.config.InputMethod = bamboo.DefaultInputMethodName
+	if e.config.InputMethod != oldInputMethod || e.config.Flags != oldFlags {
+		var inputMethod = bamboo.ParseInputMethod(e.config.InputMethodDefinitions, e.config.InputMethod)
+		if inputMethod.Name == "" {
+			inputMethod = bamboo.ParseInputMethod(e.config.InputMethodDefinitions, bamboo.DefaultInputMethodName)
+			e.config.InputMethod = bamboo.DefaultInputMethodName
+		}
+		e.uinputResetTxStateLocked()
+		e.preeditor = bamboo.NewEngine(inputMethod, e.config.Flags)
 	}
-	e.preeditor = bamboo.NewEngine(inputMethod, e.config.Flags)
+	e.configMtime_ = configFilesMtime(e.engineName)
+	e.bumpConfigGen()
 	e.RegisterProperties(e.propList)
 	return nil
 }

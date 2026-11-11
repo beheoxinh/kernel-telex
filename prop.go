@@ -42,8 +42,8 @@ const (
 	PropKeyInputModeLookupTableShortcut = "input_mode_lookup_table_shortcut"
 	PropKeyAutoCapitalizeMacro          = "auto_capitalize_macro"
 	PropKeyIMQuickSwitchEnabled         = "im_quick_switch"
-	PropKeyRestoreKeyStrokes         = "restore_key_strokes"
-	PropKeyDisableOnGame             = "disable_on_game"
+	PropKeyRestoreKeyStrokes            = "restore_key_strokes"
+	PropKeyDisableOnGame                = "disable_on_game"
 )
 
 var IBusSeparator = &ibus.Property{
@@ -101,7 +101,12 @@ func GetPropListByConfig(c *config.Config) *ibus.PropList {
 			Visible:   true,
 			Icon:      "preferences-other",
 			Symbol:    dbus.MakeVariant(ibus.NewText("")),
-			SubProps:  dbus.MakeVariant(func() *ibus.PropList { if isVi { return GetAdvancedPropList(c) }; return GetAdvancedPropListEnglish(c) }()),
+			SubProps: dbus.MakeVariant(func() *ibus.PropList {
+				if isVi {
+					return GetAdvancedPropList(c)
+				}
+				return GetAdvancedPropListEnglish(c)
+			}()),
 		},
 	)
 	props = append(props,

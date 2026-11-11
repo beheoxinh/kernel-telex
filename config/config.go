@@ -27,7 +27,46 @@ type Config struct {
 	Shortcuts              [10]uint32
 	DefaultInputMode       int
 	InputModeMapping       map[string]int
+	// UinputSelectApps: apps (normalized WM_CLASS, trailing '*' = prefix)
+	// where Kernel mode replaces a whole syllable by selecting it with
+	// Shift+Left instead of Backspace, so the field never becomes empty.
+	// nil = DefaultUinputSelectApps, empty list = disabled. The entry
+	// "@default" expands to DefaultUinputSelectApps, so a saved config keeps
+	// following the built-in list as it grows.
+	UinputSelectApps []string
 }
+
+// DefaultUinputSelectApps: Chromium-family browsers and Electron chat/notes
+// apps, whose rich editors (Gemini, ChatGPT, Messenger, Discord, Slack…)
+// re-render when Backspace empties them and drop the commit that follows.
+// Apps with a terminal inside (VS Code, Cursor) are deliberately absent:
+// Shift+Left in a terminal is an escape sequence, not a selection.
+var DefaultUinputSelectApps = []string{
+	"google-chrome", "google-chrome-beta", "google-chrome-unstable",
+	"chromium", "chromium-browser", "thorium", "thorium-browser",
+	"brave-browser", "microsoft-edge", "microsoft-edge-beta",
+	"vivaldi", "vivaldi-stable", "opera", "yandex-browser",
+	"chrome-*",
+	// Electron
+	"discord", "vesktop", "slack", "obsidian", "signal", "element",
+	"teams-for-linux", "caprine", "notion-app*", "zalo*",
+}
+
+// DefaultUinputCompletionApps: browsers, whose address and search bars
+// select an inline completion after the caret. Kernel mode clears it before
+// deleting (see uinputBeginTxLocked). Not configurable on purpose: the
+// workaround is harmless where no completion is shown.
+var DefaultUinputCompletionApps = []string{
+	"google-chrome", "google-chrome-beta", "google-chrome-unstable",
+	"chromium", "chromium-browser", "thorium", "thorium-browser",
+	"brave-browser", "microsoft-edge", "microsoft-edge-beta",
+	"vivaldi", "vivaldi-stable", "opera", "yandex-browser",
+	"firefox*", "org.mozilla.firefox", "navigator", "floorp*", "librewolf*",
+	"zen*", "app.zen_browser.zen", "waterfox*", "mullvadbrowser",
+}
+
+// UinputSelectDefaultToken in UinputSelectApps stands for the default list.
+const UinputSelectDefaultToken = "@default"
 
 // configJSON is the human-readable JSON surface.
 type configJSON struct {
@@ -35,9 +74,9 @@ type configJSON struct {
 	OutputCharset string `json:"outputCharset"`
 
 	// ── bamboo-core Flags ──
-	FreeToneMarking  bool `json:"freeToneMarking"`
-	StdToneStyle     bool `json:"stdToneStyle"`
-	AutoCorrect      bool `json:"autoCorrect"`
+	FreeToneMarking bool `json:"freeToneMarking"`
+	StdToneStyle    bool `json:"stdToneStyle"`
+	AutoCorrect     bool `json:"autoCorrect"`
 
 	// ── IBus feature toggles ──
 	UseMacro            bool `json:"useMacro"`
@@ -57,29 +96,34 @@ type configJSON struct {
 
 	DefaultInputMode int            `json:"defaultInputMode"`
 	InputModeMapping map[string]int `json:"inputModeMapping,omitempty"`
+	UinputSelectApps []string       `json:"uinputSelectApps"`
 }
 
 func (c *Config) MarshalJSON() ([]byte, error) {
 	j := configJSON{
-		InputMethod:   c.InputMethod,
-		OutputCharset: c.OutputCharset,
-		FreeToneMarking:        c.Flags&bamboo.EfreeToneMarking != 0,
-		StdToneStyle:           c.Flags&bamboo.EstdToneStyle != 0,
-		AutoCorrect:            c.Flags&bamboo.EautoCorrectEnabled != 0,
-		UseMacro:               c.IBflags&IBmacroEnabled != 0,
-		AutoCapitalizeMacro:    c.IBflags&IBautoCapitalizeMacro != 0,
-		SpellCheck:             c.IBflags&IBspellCheckEnabled != 0,
-		SpellCheckByRules:      c.IBflags&IBspellCheckWithRules != 0,
-		SpellCheckByDicts:      c.IBflags&IBspellCheckWithDicts != 0,
-		AutoNonVnRestore:       c.IBflags&IBautoNonVnRestore != 0,
-		DdFreeStyle:            c.IBflags&IBddFreeStyle != 0,
-		DisableOnGame:          c.IBflags&IBdisableOnGame != 0,
-		InputModeSwitch:        shortcutString(c.Shortcuts[0], c.Shortcuts[1]),
-		RestoreKeystrokes:      shortcutString(c.Shortcuts[2], c.Shortcuts[3]),
-		ViEnSwitch:             shortcutString(c.Shortcuts[4], c.Shortcuts[5]),
-		EmojiDialog:            shortcutString(c.Shortcuts[6], c.Shortcuts[7]),
-		DefaultInputMode:       c.DefaultInputMode,
-		InputModeMapping:       c.InputModeMapping,
+		InputMethod:         c.InputMethod,
+		OutputCharset:       c.OutputCharset,
+		FreeToneMarking:     c.Flags&bamboo.EfreeToneMarking != 0,
+		StdToneStyle:        c.Flags&bamboo.EstdToneStyle != 0,
+		AutoCorrect:         c.Flags&bamboo.EautoCorrectEnabled != 0,
+		UseMacro:            c.IBflags&IBmacroEnabled != 0,
+		AutoCapitalizeMacro: c.IBflags&IBautoCapitalizeMacro != 0,
+		SpellCheck:          c.IBflags&IBspellCheckEnabled != 0,
+		SpellCheckByRules:   c.IBflags&IBspellCheckWithRules != 0,
+		SpellCheckByDicts:   c.IBflags&IBspellCheckWithDicts != 0,
+		AutoNonVnRestore:    c.IBflags&IBautoNonVnRestore != 0,
+		DdFreeStyle:         c.IBflags&IBddFreeStyle != 0,
+		DisableOnGame:       c.IBflags&IBdisableOnGame != 0,
+		InputModeSwitch:     shortcutString(c.Shortcuts[0], c.Shortcuts[1]),
+		RestoreKeystrokes:   shortcutString(c.Shortcuts[2], c.Shortcuts[3]),
+		ViEnSwitch:          shortcutString(c.Shortcuts[4], c.Shortcuts[5]),
+		EmojiDialog:         shortcutString(c.Shortcuts[6], c.Shortcuts[7]),
+		DefaultInputMode:    c.DefaultInputMode,
+		InputModeMapping:    c.InputModeMapping,
+		UinputSelectApps:    c.UinputSelectApps,
+	}
+	if j.UinputSelectApps == nil {
+		j.UinputSelectApps = []string{UinputSelectDefaultToken}
 	}
 	return json.Marshal(j)
 }
@@ -112,6 +156,12 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	c.OutputCharset = j.OutputCharset
 	c.DefaultInputMode = j.DefaultInputMode
 	c.InputModeMapping = j.InputModeMapping
+	if _, ok := raw["uinputSelectApps"]; ok {
+		c.UinputSelectApps = j.UinputSelectApps
+		if c.UinputSelectApps == nil { // JSON null
+			c.UinputSelectApps = []string{}
+		}
+	}
 
 	c.IBflags = 0
 	if j.UseMacro {
