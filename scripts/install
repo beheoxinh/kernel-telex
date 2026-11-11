@@ -1,20 +1,29 @@
-engine_name="ktelex"
-pkg_name="ibus-${engine_name}"
-ibus_e_name="ibus-engine-${engine_name}"
-engine_gui_name="ibus-setup-KTelex.desktop"
+#!/usr/bin/env bash
+# Copy the built files into PREFIX (default /usr). Usage: scripts/install [PREFIX] [DESTDIR]
+# Needs root for system prefixes; never builds (run scripts/build first).
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
+engine_name="ktelex"
 PREFIX="${1:-/usr}"
 DESTDIR="${2:-}"
+DIST="${DIST:-dist}"
+
+if [ ! -x "${DIST}/ibus-engine-${engine_name}" ]; then
+	echo "Thiếu ${DIST}/ibus-engine-${engine_name}: hãy chạy 'make build' trước." >&2
+	exit 1
+fi
 
 # The engine reads its data from DataDir (utils.go: /usr/share/ktelex).
 engine_dir="${DESTDIR}${PREFIX}/share/${engine_name}"
-ibus_lib_dir="${DESTDIR}${PREFIX}/libexec"
-ibus_component_dir="${DESTDIR}${PREFIX}/share/ibus/component"
+libexec_dir="${DESTDIR}${PREFIX}/libexec"
+component_dir="${DESTDIR}${PREFIX}/share/ibus/component"
 apps_dir="${DESTDIR}${PREFIX}/share/applications"
 
-mkdir -p "${engine_dir}" "${ibus_lib_dir}" "${ibus_component_dir}" "${apps_dir}"
-
-cp -R -f icons data "${engine_dir}"
-cp -f "${ibus_e_name}" "${ibus_lib_dir}/"
-cp -f "data/${engine_name}.xml" "${ibus_component_dir}/"
-[ -f "data/${engine_gui_name}" ] && cp -f "data/${engine_gui_name}" "${apps_dir}/"
+install -d "${engine_dir}" "${libexec_dir}" "${component_dir}" "${apps_dir}"
+rm -rf "${engine_dir}/data" "${engine_dir}/icons"
+cp -R icons data "${engine_dir}/"
+install -m 0755 "${DIST}/ibus-engine-${engine_name}" "${libexec_dir}/"
+[ -x "${DIST}/ktelex-uinput" ] && install -m 0755 "${DIST}/ktelex-uinput" "${libexec_dir}/"
+install -m 0644 "data/${engine_name}.xml" "${component_dir}/"
+install -m 0644 "data/ibus-setup-KTelex.desktop" "${apps_dir}/"

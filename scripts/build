@@ -1,25 +1,29 @@
-# Ibus ktelex
-ibus_e_name="ibus-engine-ktelex"
-version="1.0.1"
+#!/usr/bin/env bash
+# Build KTelex into dist/ (override with DIST=...). Run as a normal user.
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
-# Go flags
-build_id=$(date +%Y%m%d%H%M%S)
-LDFLAGS="-w -s -X main.Version=${version} -X main.BuildId=${build_id}"
+DIST="${DIST:-dist}"
+VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || cat VERSION)}"
+BUILD_ID="$(date +%Y%m%d%H%M%S)"
+LDFLAGS="-w -s -X main.Version=${VERSION} -X main.BuildId=${BUILD_ID}"
+GOFLAGS_COMMON=(-mod=vendor -trimpath -ldflags "${LDFLAGS}")
 
-# Go flags for FreeBSD
-CGO_CFLAGS_FREEBSD="-I/usr/local/include -std=gnu99"
-CGO_LDFLAGS_FREEBSD="-L/usr/local/lib -lX11 -lXtst -pthread"
-
-case $(uname) in
-	"Linux") CGO_ENABLED=1 \
-		go build -o ${ibus_e_name} -ldflags "${LDFLAGS}" -mod=vendor
-		;;
-
-	"FreeBSD") CGO_ENABLED=1 \
-		CGO_CFLAGS=${CGO_CFLAGS_FREEBSD} \
-		CGO_LDFLAGS=${CGO_LDFLAGS_FREEBSD} \
-		go build -o ${ibus_e_name} -ldflags "${LDFLAGS}" -mod=vendor
-		;;
-	*) echo "Hiện tại chưa hỗ trợ hệ điều hành này!"
-		;;
+case "$(uname)" in
+Linux) ;;
+FreeBSD)
+	export CGO_CFLAGS="-I/usr/local/include -std=gnu99"
+	export CGO_LDFLAGS="-L/usr/local/lib -lX11 -lXtst -pthread"
+	;;
+*)
+	echo "Hiện tại chưa hỗ trợ hệ điều hành này: $(uname)" >&2
+	exit 1
+	;;
 esac
+export CGO_ENABLED=1
+
+mkdir -p "${DIST}"
+go build "${GOFLAGS_COMMON[@]}" -o "${DIST}/ibus-engine-ktelex" .
+# Optional root helper (socket fallback when /dev/uinput is not writable).
+go build "${GOFLAGS_COMMON[@]}" -o "${DIST}/ktelex-uinput" ./cmd/uinput-server
+echo "Built ${DIST}/ibus-engine-ktelex (${VERSION})"

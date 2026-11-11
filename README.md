@@ -13,7 +13,7 @@ KTelex tối ưu trải nghiệm gõ tiếng Việt trên Wayland bằng **chế
 - **Chế độ Kernel (`/dev/uinput`)**: Giao tiếp trực tiếp tầng evdev với adaptive timing & echo debt guard — không trượt ký tự, không kẹt phím xóa.
 - **Per-App Input Mode**: Gán chế độ gõ riêng cho từng ứng dụng, chuyển đổi tức thì bằng phím tắt (`Alt+Z`).
 - **Tự động nhận diện Game**: Tự tắt bộ gõ khi phát hiện game (Steam, Proton, Wine, Lutris, Heroic...).
-- **Đa dạng kiểu gõ & bảng mã**: Telex, VNI, VIQR; bảng mã Unicode, TCVN3, VNI Win, v.v.
+- **Kiểu gõ Telex**, bảng mã Unicode và TCVN3.
 - **Gõ tắt (Macro) & Emoji**: Macro thông minh tự viết hoa (hot-reload không cần restart), tra cứu Emoji nhanh bằng `:tên_emoji`.
 - **Kiểm tra chính tả**: Tùy chọn kiểm tra theo luật ghép vần hoặc từ điển tiếng Việt.
 - **Giao diện GTK3**: Cài đặt trực quan, dễ quản lý phím tắt và danh sách app.
@@ -53,17 +53,26 @@ KTelex tối ưu trải nghiệm gõ tiếng Việt trên Wayland bằng **chế
 ```bash
 git clone https://github.com/beheoxinh/kernel-telex.git
 cd kernel-telex
-make
-sudo make install
-ibus restart
+./prepare.sh    # lần đầu: cài Go, gcc, GTK3, IBus dev… (dnf / apt / pacman)
+./install.sh    # build ra dist/, cài vào /usr, cấp quyền /dev/uinput, khởi động lại IBus
 ```
+
+Chạy `./install.sh` bằng user thường (script tự gọi `sudo` khi cần). Trên GNOME,
+KTelex được thêm sẵn vào nguồn nhập: bấm `Super+Space` để chuyển. Lần cài đầu
+tiên có thể cần đăng xuất/đăng nhập lại một lần để quyền nhóm `input` có hiệu lực.
+
+Gỡ cài đặt: `sudo make uninstall`.
 
 ### Lệnh phát triển
 
 ```bash
-make test         # Chạy toàn bộ test suite (kèm race detector)
-make clean        # Dọn dẹp binary và file tạm
+make build        # build ra dist/ibus-engine-ktelex (+ dist/ktelex-uinput)
+make test         # toàn bộ test suite, kèm race detector
+make clean        # xoá dist/
 ```
+
+`vendor/` được commit kèm repo (bamboo-core bản rút gọn, chỉ Telex), nên build
+không cần tải module từ mạng.
 
 *Log chẩn đoán: `/tmp/ktelex.log` (khi chạy engine IBus).*
 
