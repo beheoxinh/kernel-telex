@@ -246,11 +246,3 @@ func (e *Engine) commitText(str string) {
 	e.lastCommitText = now.UnixNano()
 	e.CommitText(ibus.NewText(e.encodeText(str)))
 }
-
-func (e *Engine) getVnSeq() string {
-	return e.preeditor.GetProcessedString(bamboo.VietnameseMode)
-}
-
-func (e *Engine) hasMacroKey(key string) bool {
-	return e.macroTable.GetText(key) != ""
-}

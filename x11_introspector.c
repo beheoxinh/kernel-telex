@@ -20,18 +20,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <pthread.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
-#include <string.h> // strlen
 
-#define MAX_TEXT_LEN 100
-static pthread_t th_input_watch;
 #define MaxPropertyLen 128
 #define MaxWmClassesLen 5
 static char * WM_CLASS = "WM_CLASS";
-static char * WM_NAME = "WM_NAME";
-static char * text = NULL;
 
 static int ignore_x_error(Display *display, XErrorEvent *error) {
     return 0;
@@ -150,70 +144,4 @@ char * x11GetFocusWindowClass() {
     char * wm = x11GetFocusWindowClassByDpy(dpy);
     XCloseDisplay(dpy);
     return wm;
-}
-
-static int input_watching = 0;
-static int th_count = 0;
-static void* thread_input_watching(void* data)
-{
-    XEvent event;
-    int x_old, y_old, x_root_old, y_root_old, rt;
-    unsigned int mask;
-    Window w, w_root_return, w_child_return;
-    Display * dpy;
-
-    dpy = XOpenDisplay(NULL);
-    setXIgnoreErrorHandler();
-    if (!dpy) {
-        return NULL;
-    }
-    int revertTo;
-    XGetInputFocus(dpy, &w, &revertTo);
-    XSelectInput(dpy, w, FocusChangeMask);
-    char * name;
-    text = (char*)calloc(MAX_TEXT_LEN, sizeof(char));
-    char * cl = x11GetFocusWindowClassByDpy(dpy);
-    if (cl != NULL) {
-      strcpy(text, cl);
-    }
-    while (input_watching == 1) {
-        XNextEvent(dpy, &event);
-        /* text = (char*)calloc(MAX_TEXT_LEN, sizeof(char)); */
-        memset(text, 0, MAX_TEXT_LEN * sizeof(char));
-        if (event.type == FocusIn) {
-            cl = x11GetFocusWindowClassByDpy(dpy);
-            if (cl != NULL) {
-                strcpy(text, cl);
-            }
-        }
-        XSync(dpy, 0);
-        XGetInputFocus(dpy, &w, &revertTo);
-        XFetchName(dpy, w, &name);
-        /* printf("window:%lu name:%s class:%s\n", w, name, text); */
-        XFree(name);
-        XSelectInput(dpy, w, FocusChangeMask);
-    }
-    input_watching = 0;
-    th_count--;
-    free(text);
-    XCloseDisplay(dpy);
-    return NULL;
-}
-
-void x11StartWindowInspector()
-{
-    setbuf(stdout, NULL);
-    setbuf(stderr, NULL);
-    if (input_watching || th_count) {
-        return;
-    }
-    XInitThreads();
-    input_watching = 1;
-    th_count++;
-    pthread_create(&th_input_watch, NULL, &thread_input_watching, NULL);
-    pthread_detach(th_input_watch);
-}
-
-void x11StopWindowInspector() {
-    input_watching = 0;
 }

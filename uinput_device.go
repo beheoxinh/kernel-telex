@@ -247,24 +247,6 @@ func uinputDeviceOpen() (C.int, error) {
 	return fd, nil
 }
 
-func uinputDeviceClose() {
-	uinputDmu.Lock()
-	defer uinputDmu.Unlock()
-	if uinputFd >= 0 {
-		C.uio_dev_destroy(uinputFd)
-		C.close(uinputFd)
-		uinputFd = -1
-	}
-}
-
-func uinputDirectTap(code int) {
-	uinputDmu.Lock()
-	defer uinputDmu.Unlock()
-	if uinputFd >= 0 {
-		C.uio_tap(uinputFd, C.uint16_t(code))
-	}
-}
-
 // uinputDirectBackspace returns false when the in-process device is not
 // open (the caller then falls back to the socket server).
 func uinputDirectBackspace(n int) bool {

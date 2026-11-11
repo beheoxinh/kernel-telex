@@ -27,21 +27,11 @@ package main
 extern void setXIgnoreErrorHandler();
 extern char* x11GetFocusWindowClass();
 extern long x11GetFocusPID();
-extern void x11StartWindowInspector();
-extern void x11StopWindowInspector();
 */
 import "C"
 
 func init() {
 	C.setXIgnoreErrorHandler()
-}
-
-func x11StartWindowInspector() {
-	C.x11StartWindowInspector()
-}
-
-func x11StopWindowInspector() {
-	C.x11StopWindowInspector()
 }
 
 func x11GetFocusPID() int {

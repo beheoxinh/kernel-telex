@@ -228,64 +228,6 @@ func GetMacroPropListByConfig(c *config.Config) *ibus.PropList {
 	)
 }
 
-func GetSpellCheckingPropListByConfig(c *config.Config) *ibus.PropList {
-	spellCheckByRules := ibus.PROP_STATE_UNCHECKED
-	spellCheckByDicts := ibus.PROP_STATE_UNCHECKED
-
-	// spelling
-	spellingChecked := ibus.PROP_STATE_UNCHECKED
-	if c.IBflags&config.IBspellCheckEnabled != 0 {
-		spellingChecked = ibus.PROP_STATE_CHECKED
-	}
-	if c.IBflags&config.IBspellCheckWithRules != 0 {
-		spellCheckByRules = ibus.PROP_STATE_CHECKED
-	}
-	if c.IBflags&config.IBspellCheckWithDicts != 0 {
-		spellCheckByDicts = ibus.PROP_STATE_CHECKED
-	}
-	rulesSensitive := spellingChecked == ibus.PROP_STATE_CHECKED
-	dictsSensitive := spellingChecked == ibus.PROP_STATE_CHECKED
-	return ibus.NewPropList(
-		&ibus.Property{
-			Name:      "IBusProperty",
-			Key:       PropKeyEnableSpellCheck,
-			Type:      ibus.PROP_TYPE_TOGGLE,
-			Label:     dbus.MakeVariant(ibus.NewText("Bật kiểm tra chính tả")),
-			Tooltip:   dbus.MakeVariant(ibus.NewText("")),
-			Sensitive: true,
-			Visible:   true,
-			State:     spellingChecked,
-			Symbol:    dbus.MakeVariant(ibus.NewText("S")),
-			SubProps:  dbus.MakeVariant(*ibus.NewPropList()),
-		},
-		IBusSeparator,
-		&ibus.Property{
-			Name:      "IBusProperty",
-			Key:       PropKeySpellCheckByRules,
-			Type:      ibus.PROP_TYPE_TOGGLE,
-			Label:     dbus.MakeVariant(ibus.NewText("Sử dụng luật ghép vần")),
-			Tooltip:   dbus.MakeVariant(ibus.NewText("Sử dụng luật ghép vần")),
-			Sensitive: rulesSensitive,
-			Visible:   true,
-			State:     spellCheckByRules,
-			Symbol:    dbus.MakeVariant(ibus.NewText("M")),
-			SubProps:  dbus.MakeVariant(*ibus.NewPropList()),
-		},
-		&ibus.Property{
-			Name:      "IBusProperty",
-			Key:       PropKeySpellCheckByDicts,
-			Type:      ibus.PROP_TYPE_TOGGLE,
-			Label:     dbus.MakeVariant(ibus.NewText("Sử dụng từ điển")),
-			Tooltip:   dbus.MakeVariant(ibus.NewText("Sử dụng từ điển")),
-			Sensitive: dictsSensitive,
-			Visible:   true,
-			State:     spellCheckByDicts,
-			Symbol:    dbus.MakeVariant(ibus.NewText("O")),
-			SubProps:  dbus.MakeVariant(*ibus.NewPropList()),
-		},
-	)
-}
-
 func GetAdvancedPropList(c *config.Config) *ibus.PropList {
 	// Full advanced: macro + options (for VI engine)
 	var props []dbus.Variant
