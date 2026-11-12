@@ -129,9 +129,10 @@ func TestUinputSelectDefaultToken(t *testing.T) {
 		wm   string
 		want bool
 	}{
-		{nil, "discord", true},
-		{nil, "code", false}, // VS Code: integrated terminal
-		{[]string{"@default"}, "Slack", true},
+		// Shift+Left is opt-in: the default list is empty.
+		{nil, "discord", false},
+		{nil, "google-chrome", false}, // Excel/Sheets: Shift+Left selects cells
+		{[]string{"@default"}, "Slack", false},
 		{[]string{"@default", "myapp"}, "myapp", true},
 		{[]string{"myapp"}, "google-chrome", false},
 		{[]string{}, "google-chrome", false},

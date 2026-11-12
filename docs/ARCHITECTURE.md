@@ -678,10 +678,18 @@ Phần này thay cho các con số trong §7.4 khi có khác biệt.
   `{seen, missStreak, samples, srtt, rttvar}`. Thời gian chờ là
   `srtt + 4·rttvar + 40ms`, kẹp trong [120ms, 400ms] sau 4 mẫu. App chưa
   biết: 150ms. Trượt echo 3 lần liên tiếp → học lại từ đầu.
-- **Shift+Left thay cho Backspace:** chỉ khi thay cả âm tiết (pfx == 0) và
-  app nằm trong `uinputSelectApps` (mặc định: họ Chromium + Electron; token
-  `"@default"` giữ danh sách mặc định khi người dùng thêm app). Ô không bao
-  giờ trống, nên Gemini/ô chat không đổi trạng thái giữa chừng.
+- **Thay thế atomic qua surrounding text (đường ưu tiên):** khi surrounding
+  text mới nhất không có vùng chọn và đoạn trước con trỏ kết thúc đúng bằng
+  âm tiết, engine gọi `DeleteSurroundingText(-n, n)` rồi `CommitText`
+  (`uinputTryDstLocked`). Không có phím nào được inject, nên Excel/Sheets
+  không hiểu nhầm thành di chuyển ô, ô chat cũng không bị trống giữa chừng.
+  Surrounding text kế tiếp tự kiểm tra: app bỏ qua lệnh xoá (hiện
+  `cũ+mới`) → sửa bằng Backspace và ghi nhớ app (`uinputDstBroken`).
+  Surrounding text cũ/không có → quay về transaction phím bên dưới.
+- **Shift+Left thay cho Backspace:** opt-in. Chỉ dùng khi thay cả âm tiết
+  (pfx == 0) và app nằm trong `uinputSelectApps`. Danh sách mặc định rỗng
+  (token `"@default"`), vì Shift+Left trong Excel/Sheets mở rộng vùng chọn ô
+  và trong terminal là escape sequence.
 - **Gợi ý tự hoàn thành (inline completion):** thanh địa chỉ/thanh search
   của trình duyệt chọn sẵn phần gợi ý sau mỗi ký tự. Backspace hay Shift+Left
   đầu tiên chỉ xoá phần gợi ý, nên trước đây "dd" ra "dđ". Cách xử lý: commit

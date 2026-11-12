@@ -36,21 +36,12 @@ type Config struct {
 	UinputSelectApps []string
 }
 
-// DefaultUinputSelectApps: Chromium-family browsers and Electron chat/notes
-// apps, whose rich editors (Gemini, ChatGPT, Messenger, Discord, Slack…)
-// re-render when Backspace empties them and drop the commit that follows.
-// Apps with a terminal inside (VS Code, Cursor) are deliberately absent:
-// Shift+Left in a terminal is an escape sequence, not a selection.
-var DefaultUinputSelectApps = []string{
-	"google-chrome", "google-chrome-beta", "google-chrome-unstable",
-	"chromium", "chromium-browser", "thorium", "thorium-browser",
-	"brave-browser", "microsoft-edge", "microsoft-edge-beta",
-	"vivaldi", "vivaldi-stable", "opera", "yandex-browser",
-	"chrome-*",
-	// Electron
-	"discord", "vesktop", "slack", "obsidian", "signal", "element",
-	"teams-for-linux", "caprine", "notion-app*", "zalo*",
-}
+// DefaultUinputSelectApps is empty: the Shift+Left strategy is opt-in.
+// Arrow keys mean something to the app itself (Excel/Sheets extend the cell
+// selection with Shift+Left; a terminal turns it into an escape sequence),
+// and rich editors that drop a commit after an emptied field are served by
+// the surrounding-text replace (see uinputTryDstLocked) instead.
+var DefaultUinputSelectApps = []string{}
 
 // DefaultUinputCompletionApps: browsers, whose address and search bars
 // select an inline completion after the caret. Kernel mode clears it before

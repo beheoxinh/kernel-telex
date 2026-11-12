@@ -90,14 +90,15 @@ func TestUinputEchoProfileLearns(t *testing.T) {
 	}
 }
 
-// Chromium-family apps replace a whole syllable via Shift+Left selection,
-// so the field never becomes empty; partial replacements still use BS.
+// Apps the user puts in the select list replace a whole syllable via
+// Shift+Left selection; partial replacements still use BS.
 func TestUinputSelectStrategy(t *testing.T) {
 	var calls []int
 	uinputSelectLeftHook = func(n int) bool { calls = append(calls, n); return true }
 	defer func() { uinputSelectLeftHook = nil }()
 
 	a := newAppModel(t)
+	a.e.config.UinputSelectApps = []string{"google-chrome"}
 	a.e.wmClasses = "google-chrome:Google-chrome"
 	a.typeKey('a')
 	a.typeKey('s')
@@ -117,6 +118,7 @@ func TestUinputSelectStrategy(t *testing.T) {
 
 	// "t i e e": pfx("ti")>0 -> Backspace path, no selection.
 	b := newAppModel(t)
+	b.e.config.UinputSelectApps = []string{"google-chrome"}
 	b.e.wmClasses = "google-chrome:Google-chrome"
 	calls = nil
 	for _, k := range "tiee" {
@@ -135,6 +137,7 @@ func TestUinputSelectFallsBackToBackspace(t *testing.T) {
 	uinputSelectLeftHook = func(int) bool { return false }
 	defer func() { uinputSelectLeftHook = nil }()
 	a := newAppModel(t)
+	a.e.config.UinputSelectApps = []string{"chromium-browser"}
 	a.e.wmClasses = "chromium-browser:Chromium-browser"
 	a.typeKey('a')
 	a.typeKey('s')

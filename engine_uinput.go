@@ -2,11 +2,14 @@ package main
 
 // UinputIM ("Kernel" mode): underline-free Vietnamese typing on Wayland.
 //
-// A transformation (e.g. "as" -> "á") is applied as a transaction:
+// A transformation (e.g. "as" -> "á") is applied atomically through IBus
+// DeleteSurroundingText + CommitText when the app's surrounding text
+// confirms the syllable before the caret (see uinputTryDstLocked).
+// Otherwise it is applied as a transaction:
 //
 //  1. the key is consumed and N characters are removed through the virtual
-//     uinput keyboard (Backspace taps, or a Shift+Left selection for apps in
-//     the select list);
+//     uinput keyboard (Backspace taps, or a Shift+Left selection for apps
+//     the user put in the select list);
 //  2. those injected keys travel kernel -> compositor -> IBus and come back
 //     to ProcessKeyEvent as "echoes"; each echo is forwarded so the app
 //     performs the deletion/selection;
@@ -211,6 +214,142 @@ func (e *Engine) uinputUseSelect(wm string) bool {
 		apps = []string{config.UinputSelectDefaultToken}
 	}
 	return uinputMatchApps(norm, apps, true)
+}
+
+// ── Atomic replace through surrounding text ─────────────────────────────
+//
+// When the client reports surrounding text and the text before the caret
+// ends with the current syllable, the old part is removed with IBus
+// DeleteSurroundingText and the new part committed right after. Both travel
+// the input-method channel (text-input on Wayland applies the deletion
+// before the insertion), so no key reaches the app: a spreadsheet (Excel,
+// Sheets) cannot take an arrow key for cell navigation, and a rich editor
+// never sees an emptied field between two key events.
+//
+// The next surrounding text verifies the result. An app that ignores the
+// deletion is repaired with Backspace and remembered per WM class, so it
+// never takes this path again.
+
+const kUinputDstCheckWindow = time.Second
+
+// kUinputDstContext: runes of text before the syllable included in the
+// self-check pattern, so a word that merely looks like a failure does not.
+const kUinputDstContext = 16
+
+type dstCheck struct {
+	wm     string
+	failed string // suffix before the caret when the deletion was ignored
+	ok     string // suffix before the caret when the replace worked
+	del    int    // chars the deletion should have removed
+	add    string // committed text
+	after  string // syllable after the replace
+	at     time.Time
+}
+
+var (
+	uinputDstBroken = map[string]bool{} // guarded by uinputEchoMu
+
+	// uinputDeleteSurroundingHook replaces DeleteSurroundingText in tests.
+	uinputDeleteSurroundingHook func(n int)
+)
+
+func uinputDstAllowed(wm string) bool {
+	uinputEchoMu.Lock()
+	defer uinputEchoMu.Unlock()
+	return !uinputDstBroken[echoProfileKey(wm)]
+}
+
+func uinputNoteDstBroken(wm string) {
+	uinputEchoMu.Lock()
+	defer uinputEchoMu.Unlock()
+	uinputDstBroken[echoProfileKey(wm)] = true
+}
+
+func (e *Engine) uinputDeleteSurrounding(n int) {
+	if uinputDeleteSurroundingHook != nil {
+		uinputDeleteSurroundingHook(n)
+		return
+	}
+	e.DeleteSurroundingText(-int32(n), uint32(n))
+}
+
+func lastRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
+}
+
+// uinputTryDstLocked replaces the last deleteLen characters of oldText (the
+// syllable right before the caret) with addPart through surrounding text.
+// Returns false when the field state is unknown or stale; the caller then
+// falls back to a key transaction.
+func (e *Engine) uinputTryDstLocked(oldText string, deleteLen int, addPart string) bool {
+	if !e.uinputSurrValid_ || oldText == "" || deleteLen <= 0 || e.uinputTxOpenLocked() {
+		return false
+	}
+	wm := e.uinputLastWm_
+	if !uinputDstAllowed(wm) {
+		return false
+	}
+	before := e.uinputSurrBefore_
+	encOld := e.encodeText(oldText)
+	if !strings.HasSuffix(before, encOld) {
+		debugf("[uinputIM] surrounding text stale (%q does not end with %q): key path", lastRunes(before, kUinputDstContext), encOld)
+		return false
+	}
+	oldRunes := []rune(oldText)
+	if deleteLen > len(oldRunes) {
+		return false
+	}
+	head := e.encodeText(string(oldRunes[:len(oldRunes)-deleteLen]))
+	n := utf8.RuneCountInString(e.encodeText(string(oldRunes[len(oldRunes)-deleteLen:])))
+	encAdd := e.encodeText(addPart)
+	base := lastRunes(strings.TrimSuffix(before, encOld), kUinputDstContext)
+
+	e.uinputDeleteSurrounding(n)
+	e.commitText(addPart)
+	e.uinputSurrValid_ = false // until the app reports its new state
+	e.uinputTxEndAt_ = time.Now()
+	e.uinputDstCheck_ = &dstCheck{
+		wm:     wm,
+		failed: base + encOld + encAdd,
+		ok:     base + head + encAdd,
+		del:    n,
+		add:    addPart,
+		after:  e.uinputPreeditString(),
+		at:     time.Now(),
+	}
+	debugf("[uinputIM] surrounding replace: delete %d, commit %q", n, addPart)
+	return true
+}
+
+// uinputCheckDstLocked verifies the last surrounding-text replace against
+// the text now before the caret.
+func (e *Engine) uinputCheckDstLocked(before string) {
+	c := e.uinputDstCheck_
+	if c == nil {
+		return
+	}
+	if time.Since(c.at) > kUinputDstCheckWindow {
+		e.uinputDstCheck_ = nil
+		return
+	}
+	switch {
+	case strings.HasSuffix(before, c.failed):
+		e.uinputDstCheck_ = nil
+		uinputNoteDstBroken(c.wm)
+		log.Printf("[uinputIM] %s ignored DeleteSurroundingText: disabled for this app", c.wm)
+		// Repair only while the field still ends exactly where we left it.
+		if !e.uinputTxOpenLocked() && e.uinputPreeditString() == c.after {
+			e.uinputBeginTxLocked(c.del+utf8.RuneCountInString(e.encodeText(c.add)), c.add, false)
+		}
+	case strings.HasSuffix(before, c.ok):
+		e.uinputDstCheck_ = nil
+		debugf("[uinputIM] surrounding replace verified")
+	}
+	// Otherwise an intermediate state (deletion applied, commit pending): wait.
 }
 
 func uinputMatchApps(norm string, apps []string, expand bool) bool {
@@ -495,6 +634,8 @@ func (e *Engine) uinputOnFocusIn(latestWm string) {
 	e.uinputFocused_ = true
 	e.uinputSurroundSeen_ = false
 	e.uinputInlineCompletion_ = false
+	e.uinputSurrValid_ = false
+	e.uinputDstCheck_ = nil
 	sameApp := latestWm == "" || e.uinputLastWm_ == "" || isSameWmClass(latestWm, e.uinputLastWm_)
 	if e.uinputTxOpenLocked() {
 		if !sameApp {
@@ -561,16 +702,26 @@ func (e *Engine) uinputOnSurroundingText(text string, cursor, anchor uint32) {
 	e.Lock()
 	defer e.Unlock()
 	runes := []rune(text)
-	if len(runes) == 0 || int(cursor) > len(runes) || int(anchor) > len(runes) {
+	if int(cursor) > len(runes) || int(anchor) > len(runes) {
+		e.uinputSurrValid_ = false
 		return // no usable information
-	}
-	e.uinputSurroundSeen_ = true
-	if e.getRawKeyLen() == 0 {
-		return
 	}
 	lo, hi := cursor, anchor
 	if lo > hi {
 		lo, hi = hi, lo
+	}
+	e.uinputSurrValid_ = lo == hi
+	e.uinputSurrBefore_ = ""
+	if e.uinputSurrValid_ {
+		e.uinputSurrBefore_ = string(runes[:lo])
+		e.uinputCheckDstLocked(e.uinputSurrBefore_)
+	}
+	if len(runes) == 0 {
+		return // an empty field says nothing about the caret
+	}
+	e.uinputSurroundSeen_ = true
+	if e.getRawKeyLen() == 0 {
+		return
 	}
 	syllableEndsAt := func(pos uint32) bool {
 		before := string(runes[:pos])
@@ -762,9 +913,12 @@ func (e *Engine) uinputHandleKeyLocked(keyVal, keyCode, state uint32, replay boo
 
 	if keyVal == IBusTab {
 		if ok, macText := e.getMacroText(); ok {
-			if rawLen := utf8.RuneCountInString(e.uinputPreeditString()); rawLen > 0 {
+			oldText := e.uinputPreeditString()
+			if rawLen := utf8.RuneCountInString(oldText); rawLen > 0 {
 				e.preeditor.Reset()
-				e.uinputBeginTxLocked(rawLen, macText, true)
+				if !e.uinputTryDstLocked(oldText, rawLen, macText) {
+					e.uinputBeginTxLocked(rawLen, macText, true)
+				}
 			} else {
 				e.commitText(macText)
 			}
@@ -813,9 +967,11 @@ func (e *Engine) uinputHandleKeyLocked(keyVal, keyCode, state uint32, replay boo
 	debugf("[uinputIM] transform %q + %q -> %q (pfx=%d del=%d add=%q)", oldText, keyS, afterText, pfx, deleteLen, addPart)
 
 	if deleteLen > 0 {
-		// Selecting is only needed when the whole syllable is replaced: that
-		// is the only case where Backspace can empty the field.
-		e.uinputBeginTxLocked(deleteLen, addPart, pfx == 0)
+		if !e.uinputTryDstLocked(oldText, deleteLen, addPart) {
+			// Selecting is only needed when the whole syllable is replaced:
+			// that is the only case where Backspace can empty the field.
+			e.uinputBeginTxLocked(deleteLen, addPart, pfx == 0)
+		}
 	} else if addPart != "" {
 		e.commitText(addPart)
 	} else {

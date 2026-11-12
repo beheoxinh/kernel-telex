@@ -90,6 +90,9 @@ type Engine struct {
 	inputPurpose_           uint32       // IBusInputPurpose of the focused field (guarded by Mutex)
 	uinputSurroundSeen_     bool         // client sent usable surrounding text since FocusIn (UinputIM)
 	uinputInlineCompletion_ bool         // focused field showed an inline completion (surrounding text)
+	uinputSurrBefore_       string       // text before the caret in the last surrounding text (no selection)
+	uinputSurrValid_        bool         // uinputSurrBefore_ describes the field (caret, no selection)
+	uinputDstCheck_         *dstCheck    // pending self-check of the last surrounding-text replace
 	configMtime_            time.Time    // newest mtime of the config files when last loaded
 	configGen_              uint64       // bumped on every config change (atomic)
 	imCacheMu               sync.Mutex   // guards imCache
