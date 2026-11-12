@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -246,8 +247,54 @@ type dstCheck struct {
 	at     time.Time
 }
 
+// Fast typing: the surrounding text of the previous key may not have
+// arrived yet when the next key transforms the syllable. Instead of falling
+// back to injected Backspace at once, wait up to kUinputDstAwait for the
+// app's update; keys typed meanwhile are buffered and replayed in order.
+// An app whose update never arrives in time kUinputDstLagMax times in a
+// row is not waited for any more (until a replace succeeds again).
+const (
+	kUinputDstAwait  = 40 * time.Millisecond
+	kUinputDstLagMax = 3
+)
+
+type dstAwait struct {
+	old         string
+	del         int
+	add         string
+	allowSelect bool
+	wm          string
+	timer       *time.Timer
+}
+
+// kUinputChordMask: modifiers that turn a key into a command.
+const kUinputChordMask = IBusControlMask | IBusMod1Mask | IBusMod4Mask | IBusSuperMask | IBusHyperMask | IBusMetaMask
+
+// isModifierKeysym: Shift/Control/Alt/Super/Hyper/Meta/CapsLock and the
+// ISO level shifts, pressed on their own.
+func isModifierKeysym(k uint32) bool {
+	return (k >= 0xffe1 && k <= 0xffee) || (k >= 0xfe01 && k <= 0xfe13)
+}
+
+var uinputInjectWarned atomic.Bool
+
+func uinputNoteInjectFailure() {
+	if uinputInjectWarned.CompareAndSwap(false, true) {
+		log.Printf("[uinputIM] cannot inject keys (no /dev/uinput access): replacing through DeleteSurroundingText")
+	}
+}
+
+type dstResult int
+
+const (
+	dstDone  dstResult = iota // replaced through surrounding text
+	dstStale                  // field state lags behind the engine
+	dstNo                     // not applicable: use keys
+)
+
 var (
 	uinputDstBroken = map[string]bool{} // guarded by uinputEchoMu
+	uinputDstLag    = map[string]int{}  // consecutive await timeouts, guarded by uinputEchoMu
 
 	// uinputDeleteSurroundingHook replaces DeleteSurroundingText in tests.
 	uinputDeleteSurroundingHook func(n int)
@@ -257,6 +304,23 @@ func uinputDstAllowed(wm string) bool {
 	uinputEchoMu.Lock()
 	defer uinputEchoMu.Unlock()
 	return !uinputDstBroken[echoProfileKey(wm)]
+}
+
+func uinputDstLagOK(wm string) bool {
+	uinputEchoMu.Lock()
+	defer uinputEchoMu.Unlock()
+	return uinputDstLag[echoProfileKey(wm)] < kUinputDstLagMax
+}
+
+func uinputNoteDstLag(wm string, timedOut bool) {
+	uinputEchoMu.Lock()
+	defer uinputEchoMu.Unlock()
+	k := echoProfileKey(wm)
+	if timedOut {
+		uinputDstLag[k]++
+	} else {
+		delete(uinputDstLag, k)
+	}
 }
 
 func uinputNoteDstBroken(wm string) {
@@ -283,25 +347,28 @@ func lastRunes(s string, n int) string {
 
 // uinputTryDstLocked replaces the last deleteLen characters of oldText (the
 // syllable right before the caret) with addPart through surrounding text.
-// Returns false when the field state is unknown or stale; the caller then
-// falls back to a key transaction.
-func (e *Engine) uinputTryDstLocked(oldText string, deleteLen int, addPart string) bool {
-	if !e.uinputSurrValid_ || oldText == "" || deleteLen <= 0 || e.uinputTxOpenLocked() {
-		return false
+// Returns dstStale when the field state lags behind (or is unknown) and
+// dstNo when the path does not apply; the caller then uses keys.
+func (e *Engine) uinputTryDstLocked(oldText string, deleteLen int, addPart string) dstResult {
+	oldRunes := []rune(oldText)
+	if oldText == "" || deleteLen <= 0 || deleteLen > len(oldRunes) || e.uinputTxOpenLocked() {
+		return dstNo
 	}
 	wm := e.uinputLastWm_
 	if !uinputDstAllowed(wm) {
-		return false
+		return dstNo
+	}
+	if !e.uinputSurrValid_ {
+		if e.uinputSurrSel_ {
+			return dstNo // a selection: typing replaces it, keys handle that
+		}
+		return dstStale
 	}
 	before := e.uinputSurrBefore_
 	encOld := e.encodeText(oldText)
 	if !strings.HasSuffix(before, encOld) {
-		debugf("[uinputIM] surrounding text stale (%q does not end with %q): key path", lastRunes(before, kUinputDstContext), encOld)
-		return false
-	}
-	oldRunes := []rune(oldText)
-	if deleteLen > len(oldRunes) {
-		return false
+		debugf("[uinputIM] surrounding text stale (%q does not end with %q)", lastRunes(before, kUinputDstContext), encOld)
+		return dstStale
 	}
 	head := e.encodeText(string(oldRunes[:len(oldRunes)-deleteLen]))
 	n := utf8.RuneCountInString(e.encodeText(string(oldRunes[len(oldRunes)-deleteLen:])))
@@ -311,7 +378,9 @@ func (e *Engine) uinputTryDstLocked(oldText string, deleteLen int, addPart strin
 	e.uinputDeleteSurrounding(n)
 	e.commitText(addPart)
 	e.uinputSurrValid_ = false // until the app reports its new state
-	e.uinputTxEndAt_ = time.Now()
+	// Not uinputTxEndAt_: nothing was injected, so the stray-echo guard
+	// must not swallow the user's next Backspace.
+	e.uinputDstAt_ = time.Now()
 	e.uinputDstCheck_ = &dstCheck{
 		wm:     wm,
 		failed: base + encOld + encAdd,
@@ -321,8 +390,105 @@ func (e *Engine) uinputTryDstLocked(oldText string, deleteLen int, addPart strin
 		after:  e.uinputPreeditString(),
 		at:     time.Now(),
 	}
+	uinputNoteDstLag(wm, false)
 	debugf("[uinputIM] surrounding replace: delete %d, commit %q", n, addPart)
-	return true
+	return dstDone
+}
+
+// uinputReplaceLocked replaces the last deleteLen characters of oldText
+// with addPart: through surrounding text when the field state is current,
+// after waiting briefly for it when it lags (fast typing), else with keys.
+func (e *Engine) uinputReplaceLocked(oldText string, deleteLen int, addPart string, allowSelect bool) {
+	switch e.uinputTryDstLocked(oldText, deleteLen, addPart) {
+	case dstDone:
+		return
+	case dstStale:
+		wm := e.uinputLastWm_
+		if e.uinputSurrAny_ && uinputDstLagOK(wm) {
+			a := &dstAwait{old: oldText, del: deleteLen, add: addPart, allowSelect: allowSelect, wm: wm}
+			a.timer = time.AfterFunc(kUinputDstAwait, func() {
+				e.Lock()
+				defer e.Unlock()
+				if e.uinputAwait_ != a {
+					return
+				}
+				uinputNoteDstLag(a.wm, true)
+				debugf("[uinputIM] no fresh surrounding text in %v: key path", kUinputDstAwait)
+				e.uinputAwaitFallbackLocked()
+			})
+			e.uinputAwait_ = a
+			debugf("[uinputIM] surrounding text lags: wait up to %v", kUinputDstAwait)
+			return
+		}
+	}
+	e.uinputBeginTxLocked(e.uinputKeyDel(oldText, deleteLen), addPart, allowSelect)
+}
+
+// uinputKeyDel converts the number of characters to replace at the end of
+// oldText into Backspaces: the field holds the text in the output charset,
+// where one character can take several code points (Unicode tổ hợp,
+// VNI/TCVN3 style encodings).
+func (e *Engine) uinputKeyDel(oldText string, deleteLen int) int {
+	r := []rune(oldText)
+	if deleteLen <= 0 || deleteLen > len(r) {
+		return deleteLen
+	}
+	return utf8.RuneCountInString(e.encodeText(string(r[len(r)-deleteLen:])))
+}
+
+// uinputRetryAwaitLocked runs when fresh surrounding text arrives while a
+// replace waits for it.
+func (e *Engine) uinputRetryAwaitLocked() {
+	a := e.uinputAwait_
+	if a == nil || !e.uinputSurrValid_ {
+		if a != nil && e.uinputSurrSel_ {
+			e.uinputAwaitFallbackLocked()
+		}
+		return
+	}
+	if !strings.HasSuffix(e.uinputSurrBefore_, e.encodeText(a.old)) {
+		return // an intermediate state: keep waiting
+	}
+	e.uinputAwait_ = nil
+	a.timer.Stop()
+	if e.uinputTryDstLocked(a.old, a.del, a.add) != dstDone {
+		e.uinputBeginTxLocked(e.uinputKeyDel(a.old, a.del), a.add, a.allowSelect)
+		return // buffered keys replay at tx end
+	}
+	e.uinputReplayDeferredLocked()
+}
+
+// uinputAwaitFallbackLocked gives up waiting and replaces with keys.
+func (e *Engine) uinputAwaitFallbackLocked() {
+	a := e.uinputAwait_
+	if a == nil {
+		return
+	}
+	e.uinputAwait_ = nil
+	a.timer.Stop()
+	e.uinputBeginTxLocked(e.uinputKeyDel(a.old, a.del), a.add, a.allowSelect)
+}
+
+// uinputDropAwaitLocked abandons a waiting replace: the app changed, so the
+// syllable is no longer in front of the caret. The keys buffered meanwhile
+// were typed for the old app; replaying them would edit (and inject
+// Backspaces into) the new one, so they go with the syllable.
+func (e *Engine) uinputDropAwaitLocked() {
+	a := e.uinputAwait_
+	if a == nil {
+		return
+	}
+	e.uinputAwait_ = nil
+	a.timer.Stop()
+	debugf("[uinputIM] app changed while waiting for surrounding text: drop replace and %d buffered keys", len(e.uinputDeferredKeys_))
+	e.uinputDeferredKeys_, e.uinputDeferredCodes_, e.uinputDeferredStates_ = nil, nil, nil
+	e.preeditor.Reset()
+}
+
+func (e *Engine) uinputReplayDeferredLocked() {
+	keys, codes, states := e.uinputDeferredKeys_, e.uinputDeferredCodes_, e.uinputDeferredStates_
+	e.uinputDeferredKeys_, e.uinputDeferredCodes_, e.uinputDeferredStates_ = nil, nil, nil
+	e.uinputReplayLocked(keys, codes, states)
 }
 
 // uinputCheckDstLocked verifies the last surrounding-text replace against
@@ -453,7 +619,7 @@ func (e *Engine) uinputStopTimerLocked() {
 }
 
 func (e *Engine) uinputTxOpenLocked() bool {
-	return e.uinputDeleting_ || e.uinputPendingCommit_ != ""
+	return e.uinputDeleting_ || e.uinputPendingCommit_ != "" || e.uinputAwait_ != nil
 }
 
 // uinputResetTxStateLocked drops every piece of transaction state without
@@ -469,6 +635,10 @@ func (e *Engine) uinputResetTxStateLocked() {
 	e.uinputDeferredStates_ = nil
 	e.uinputTxSelect_ = false
 	e.uinputAwaitFocus_ = false
+	if e.uinputAwait_ != nil {
+		e.uinputAwait_.timer.Stop()
+		e.uinputAwait_ = nil
+	}
 }
 
 // ── Transaction lifecycle ───────────────────────────────────────────────
@@ -522,13 +692,23 @@ func (e *Engine) uinputBeginTxLocked(deleteLen int, commitText string, allowSele
 		e.uinputFinishTxLocked(txID, "timer")
 	})
 
+	injected := true
 	if useSelect {
 		if !uinputSelectLeft(deleteLen) {
 			e.uinputTxSelect_ = false
-			uinputBackspace(deleteLen)
+			injected = uinputBackspace(deleteLen)
 		}
 	} else {
-		uinputBackspace(deleteLen)
+		injected = uinputBackspace(deleteLen)
+	}
+	if !injected {
+		// No virtual keyboard: committing now would leave the old syllable
+		// in place ("an"+"s" -> "anán"). Ask the app to delete it instead;
+		// most toolkits honour DeleteSurroundingText.
+		uinputNoteInjectFailure()
+		e.uinputExpectingBs_ = 0
+		e.uinputDeleteSurrounding(deleteLen)
+		e.uinputEndTxLocked(txID, "no-injection")
 	}
 }
 
@@ -602,13 +782,31 @@ func (e *Engine) uinputEndTxLocked(txID uint64, reason string) {
 	e.uinputReplayLocked(keys, codes, states)
 }
 
+// uinputAbortTxLocked ends the transaction without committing or replaying:
+// the focus moved to another application, which must not receive the
+// replacement or the keys typed for the previous one.
+func (e *Engine) uinputAbortTxLocked(reason string) {
+	if !e.uinputDeleting_ && e.uinputPendingCommit_ == "" {
+		return
+	}
+	if e.uinputPendingCommit_ != "" || len(e.uinputDeferredKeys_) > 0 {
+		log.Printf("[uinputIM] tx abort (%s): drop commit and %d buffered key(s)", reason, len(e.uinputDeferredKeys_))
+	}
+	e.uinputPendingCommit_ = ""
+	e.uinputDeferredKeys_ = nil
+	e.uinputDeferredCodes_ = nil
+	e.uinputDeferredStates_ = nil
+	e.uinputEndTxLocked(e.uinputTxID_, reason)
+	e.preeditor.Reset()
+}
+
 // uinputReplayLocked feeds keys buffered during a transaction back through
 // the key logic. Keys that would normally be forwarded raw are sent with
 // ForwardKeyEvent; a key that opens a new transaction leaves the rest
 // buffered on it.
 func (e *Engine) uinputReplayLocked(keys, codes, states []uint32) {
 	for i := range keys {
-		if e.uinputDeleting_ {
+		if e.uinputDeleting_ || e.uinputAwait_ != nil {
 			e.uinputDeferredKeys_ = append(e.uinputDeferredKeys_, keys[i:]...)
 			e.uinputDeferredCodes_ = append(e.uinputDeferredCodes_, codes[i:]...)
 			e.uinputDeferredStates_ = append(e.uinputDeferredStates_, states[i:]...)
@@ -635,11 +833,15 @@ func (e *Engine) uinputOnFocusIn(latestWm string) {
 	e.uinputSurroundSeen_ = false
 	e.uinputInlineCompletion_ = false
 	e.uinputSurrValid_ = false
+	e.uinputSurrAny_ = false
 	e.uinputDstCheck_ = nil
 	sameApp := latestWm == "" || e.uinputLastWm_ == "" || isSameWmClass(latestWm, e.uinputLastWm_)
+	if e.uinputAwait_ != nil && !sameApp {
+		e.uinputDropAwaitLocked()
+	}
 	if e.uinputTxOpenLocked() {
 		if !sameApp {
-			e.uinputEndTxLocked(e.uinputTxID_, "focusin-app-change")
+			e.uinputAbortTxLocked("focusin-app-change")
 			return
 		}
 		if e.uinputAwaitFocus_ && e.uinputDeleting_ {
@@ -685,6 +887,9 @@ func (e *Engine) uinputCaretMayHaveMovedLocked() bool {
 	if !e.uinputTxEndAt_.IsZero() && now.Sub(e.uinputTxEndAt_) < kUinputCaretIdle {
 		return false
 	}
+	if !e.uinputDstAt_.IsZero() && now.Sub(e.uinputDstAt_) < kUinputCaretIdle {
+		return false
+	}
 	return true
 }
 
@@ -704,17 +909,27 @@ func (e *Engine) uinputOnSurroundingText(text string, cursor, anchor uint32) {
 	runes := []rune(text)
 	if int(cursor) > len(runes) || int(anchor) > len(runes) {
 		e.uinputSurrValid_ = false
+		e.uinputSurrSel_ = false
 		return // no usable information
 	}
 	lo, hi := cursor, anchor
 	if lo > hi {
 		lo, hi = hi, lo
 	}
+	e.uinputSurrAny_ = true
 	e.uinputSurrValid_ = lo == hi
+	e.uinputSurrSel_ = lo != hi
+	if lo == hi {
+		e.uinputInlineCompletion_ = false // no completion shown any more
+	}
 	e.uinputSurrBefore_ = ""
 	if e.uinputSurrValid_ {
 		e.uinputSurrBefore_ = string(runes[:lo])
 		e.uinputCheckDstLocked(e.uinputSurrBefore_)
+	}
+	if e.uinputAwait_ != nil {
+		e.uinputRetryAwaitLocked()
+		return
 	}
 	if len(runes) == 0 {
 		return // an empty field says nothing about the caret
@@ -798,7 +1013,7 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 	// Late echoes of a transaction that already ended (watchdog fired before
 	// they arrived) and stray duplicates.
 	if !e.uinputDeleting_ && e.uinputOwedBs_ > 0 && keyVal == e.uinputOwedKey_ {
-		if time.Now().Before(e.uinputOwedExpiresAt_) && (keyVal != IBusBackSpace || !isPhysicalBackspaceDown()) {
+		if time.Now().Before(e.uinputOwedExpiresAt_) && (keyVal != IBusBackSpace || !physBackspaceMaybeDown()) {
 			e.uinputOwedBs_--
 			// A late echo: teach the profile how slow the app really is.
 			uinputNoteEcho(e.uinputTxWm_, time.Since(e.uinputBsSentAt_))
@@ -807,7 +1022,7 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		}
 		e.uinputOwedBs_ = 0
 	}
-	if keyVal == IBusBackSpace && !e.uinputDeleting_ && !isPhysicalBackspaceDown() {
+	if keyVal == IBusBackSpace && !e.uinputDeleting_ && !physBackspaceMaybeDown() {
 		if !e.uinputTxEndAt_.IsZero() && time.Since(e.uinputTxEndAt_) < kUinputStrayBsGuard {
 			log.Printf("[uinputIM] stray BS echo after tx end: swallow")
 			return true, nil
@@ -819,13 +1034,23 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 			return true, nil
 		}
 	}
+	// A key that arrives while focus is out, and focus left well after the
+	// last key, is typed into whatever got focus next: FocusIn may still be
+	// asking GNOME Shell which app that is. Do now what FocusIn would do and
+	// forget the syllable, so a tone key cannot delete text in the new field.
+	if !e.uinputFocused_ && !e.uinputTxOpenLocked() && !e.uinputLastKeyAt_.IsZero() &&
+		e.uinputFocusOutAt_.Sub(e.uinputLastKeyAt_) > kUinputFocusResetIdle && e.getRawKeyLen() > 0 {
+		debugf("[uinputIM] key before FocusIn of a new field: drop syllable %q", e.uinputPreeditString())
+		e.preeditor.Reset()
+	}
 	e.uinputLastKeyAt_ = time.Now()
 
 	wm := e.getWmClass()
 	if e.uinputLastWm_ != "" && wm != "" && !isSameWmClass(wm, e.uinputLastWm_) {
+		e.uinputDropAwaitLocked()
 		if e.uinputTxOpenLocked() {
-			log.Printf("[uinputIM] wm change %s -> %s with open tx: end tx", e.uinputLastWm_, wm)
-			e.uinputEndTxLocked(e.uinputTxID_, "wm-change")
+			log.Printf("[uinputIM] wm change %s -> %s with open tx: abort tx", e.uinputLastWm_, wm)
+			e.uinputAbortTxLocked("wm-change")
 		}
 		if e.getRawKeyLen() > 0 {
 			debugf("[uinputIM] app change: reset preedit")
@@ -834,6 +1059,14 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 	}
 	if wm != "" {
 		e.uinputLastWm_ = wm
+	}
+
+	if e.uinputAwait_ != nil && !e.uinputDeleting_ {
+		if keyVal >= 0xffe1 && keyVal <= 0xfff0 { // modifiers
+			return false, nil
+		}
+		e.uinputBufferKeyLocked(keyVal, keyCode, state)
+		return true, nil
 	}
 
 	if e.uinputDeleting_ {
@@ -869,19 +1102,23 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 		if e.uinputExpectingBs_ > 0 && time.Since(e.uinputBsSentAt_) > kUinputStaleTimeout {
 			debugf("[uinputIM] no echo progress (seen=%d expect=%d)", e.uinputSeenBs_, e.uinputExpectingBs_)
 		}
-		if len(e.uinputDeferredKeys_) < kUinputMaxDeferred {
-			debugf("[uinputIM] buffer key 0x%04x during tx", keyVal)
-			e.uinputDeferredKeys_ = append(e.uinputDeferredKeys_, keyVal)
-			e.uinputDeferredCodes_ = append(e.uinputDeferredCodes_, keyCode)
-			e.uinputDeferredStates_ = append(e.uinputDeferredStates_, state)
-		} else {
-			log.Printf("[uinputIM] deferred buffer full, dropping key 0x%04x", keyVal)
-		}
+		e.uinputBufferKeyLocked(keyVal, keyCode, state)
 		return true, nil
 	}
 
 	defer e.updateLastKeyWithShift(keyVal, state)
 	return e.uinputHandleKeyLocked(keyVal, keyCode, state, false), nil
+}
+
+func (e *Engine) uinputBufferKeyLocked(keyVal, keyCode, state uint32) {
+	if len(e.uinputDeferredKeys_) >= kUinputMaxDeferred {
+		log.Printf("[uinputIM] deferred buffer full, dropping key 0x%04x", keyVal)
+		return
+	}
+	debugf("[uinputIM] buffer key 0x%04x during tx", keyVal)
+	e.uinputDeferredKeys_ = append(e.uinputDeferredKeys_, keyVal)
+	e.uinputDeferredCodes_ = append(e.uinputDeferredCodes_, keyCode)
+	e.uinputDeferredStates_ = append(e.uinputDeferredStates_, state)
 }
 
 // uinputHandleKeyLocked runs the composition logic for one key outside a
@@ -890,13 +1127,28 @@ func (e *Engine) uinputProcessKeyEvent(keyVal uint32, keyCode uint32, state uint
 func (e *Engine) uinputHandleKeyLocked(keyVal, keyCode, state uint32, replay bool) bool {
 	keyRune := rune(keyVal)
 
-	if state&(IBusControlMask|IBusMod1Mask) != 0 && keyRune >= 'a' && keyRune <= 'z' {
+	// Ctrl/Alt/Super chords (paste, undo, Ctrl+Backspace, Ctrl+W in a
+	// terminal…) change the text in ways the engine cannot follow: the
+	// syllable it remembers is no longer before the caret, and the next tone
+	// key would delete the wrong characters.
+	if state&kUinputChordMask != 0 && !isModifierKeysym(keyVal) {
+		if e.getRawKeyLen() > 0 {
+			debugf("[uinputIM] chord 0x%04x state 0x%x: drop syllable", keyVal, state)
+			e.preeditor.Reset()
+		}
 		return false
 	}
 
 	if keyVal == IBusBackSpace {
 		if !replay && e.uinputRunawayBsLocked() {
 			return true
+		}
+		if e.uinputInlineCompletion_ && e.uinputSurrSel_ {
+			// The app removes the inline completion (the selection after
+			// the syllable), not a character of the syllable.
+			e.uinputInlineCompletion_ = false
+			debugf("[uinputIM] BS clears the inline completion: keep %q", e.uinputPreeditString())
+			return false
 		}
 		if e.getRawKeyLen() > 0 {
 			e.preeditor.RemoveLastChar(true)
@@ -916,9 +1168,7 @@ func (e *Engine) uinputHandleKeyLocked(keyVal, keyCode, state uint32, replay boo
 			oldText := e.uinputPreeditString()
 			if rawLen := utf8.RuneCountInString(oldText); rawLen > 0 {
 				e.preeditor.Reset()
-				if !e.uinputTryDstLocked(oldText, rawLen, macText) {
-					e.uinputBeginTxLocked(rawLen, macText, true)
-				}
+				e.uinputReplaceLocked(oldText, rawLen, macText, true)
 			} else {
 				e.commitText(macText)
 			}
@@ -934,10 +1184,28 @@ func (e *Engine) uinputHandleKeyLocked(keyVal, keyCode, state uint32, replay boo
 		return false
 	}
 
-	if bamboo.IsWordBreakSymbol(keyRune) {
-		if e.getRawKeyLen() > 0 {
-			e.resetPreedit()
+	// Telex 2 types ơ/ư with [ ] { }: those are letters there, not breaks.
+	if bamboo.IsWordBreakSymbol(keyRune) && !inKeyList(e.preeditor.GetInputMethod().AppendingKeys, keyRune) {
+		if e.getRawKeyLen() == 0 {
+			return false
 		}
+		if e.isPrintableKey(state, keyVal) && e.shouldRestoreEnglish() {
+			// English word: put the raw keys back, then the break key.
+			oldText := e.uinputPreeditString()
+			en := e.getProcessedString(bamboo.EnglishMode)
+			e.resetPreedit()
+			pfx := runePrefixLen(oldText, en)
+			deleteLen := utf8.RuneCountInString(oldText) - pfx
+			addPart := string([]rune(en)[pfx:]) + string(keyRune)
+			debugf("[uinputIM] restore English %q -> %q", oldText, en)
+			if deleteLen > 0 {
+				e.uinputReplaceLocked(oldText, deleteLen, addPart, pfx == 0)
+			} else {
+				e.commitText(addPart)
+			}
+			return true
+		}
+		e.resetPreedit()
 		return false
 	}
 
@@ -967,11 +1235,9 @@ func (e *Engine) uinputHandleKeyLocked(keyVal, keyCode, state uint32, replay boo
 	debugf("[uinputIM] transform %q + %q -> %q (pfx=%d del=%d add=%q)", oldText, keyS, afterText, pfx, deleteLen, addPart)
 
 	if deleteLen > 0 {
-		if !e.uinputTryDstLocked(oldText, deleteLen, addPart) {
-			// Selecting is only needed when the whole syllable is replaced:
-			// that is the only case where Backspace can empty the field.
-			e.uinputBeginTxLocked(deleteLen, addPart, pfx == 0)
-		}
+		// Selecting is only needed when the whole syllable is replaced:
+		// that is the only case where Backspace can empty the field.
+		e.uinputReplaceLocked(oldText, deleteLen, addPart, pfx == 0)
 	} else if addPart != "" {
 		e.commitText(addPart)
 	} else {
@@ -989,7 +1255,7 @@ func (e *Engine) uinputRunawayBsLocked() bool {
 	e.uinputLastIdleBsAt_ = now
 	if interval < 45*time.Millisecond || (e.uinputIdleBsBurstCount_ >= 2 && interval < 120*time.Millisecond) {
 		e.uinputIdleBsBurstCount_++
-		if e.uinputIdleBsBurstCount_ >= 2 && !isPhysicalBackspaceDown() {
+		if e.uinputIdleBsBurstCount_ >= 2 && !physBackspaceMaybeDown() {
 			uinputReleaseAll()
 			log.Printf("[uinputIM] RUNAWAY BS STORM (burst=%d, intv=%v): swallowed", e.uinputIdleBsBurstCount_, interval)
 			return true

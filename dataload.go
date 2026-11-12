@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 )
 
 // Shared data files (emoji trie, spell-check dictionary) are loaded lazily on
@@ -12,6 +13,10 @@ import (
 
 var dataLoadMu sync.Mutex
 var emojiLoaded, dictLoaded bool
+
+// dictionaryOK is set once the spell-check dictionary is usable. Without it
+// every Vietnamese word would count as misspelled and be reverted.
+var dictionaryOK atomic.Bool
 
 func ensureEmojiTrie() {
 	dataLoadMu.Lock()
@@ -40,5 +45,10 @@ func ensureDictionary() {
 		log.Printf("spell check: load %s: %v", DictVietnameseCm, err)
 		return
 	}
+	if len(d) == 0 {
+		log.Printf("spell check: %s is empty: using the spelling rules", DictVietnameseCm)
+		return
+	}
 	dictionary = d
+	dictionaryOK.Store(true)
 }

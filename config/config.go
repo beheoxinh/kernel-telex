@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/BambooEngine/bamboo-core"
 )
@@ -80,10 +83,12 @@ type configJSON struct {
 	DisableOnGame       bool `json:"disableOnGame"`
 
 	// ── Shortcut keys ──
-	InputModeSwitch   string `json:"inputModeSwitch,omitempty"`
-	RestoreKeystrokes string `json:"restoreKeystrokes,omitempty"`
-	ViEnSwitch        string `json:"viEnSwitch,omitempty"`
-	EmojiDialog       string `json:"emojiDialog,omitempty"`
+	// "" = no shortcut. Always written, so a cleared shortcut stays cleared
+	// instead of falling back to the default.
+	InputModeSwitch   string `json:"inputModeSwitch"`
+	RestoreKeystrokes string `json:"restoreKeystrokes"`
+	ViEnSwitch        string `json:"viEnSwitch"`
+	EmojiDialog       string `json:"emojiDialog"`
 
 	DefaultInputMode int            `json:"defaultInputMode"`
 	InputModeMapping map[string]int `json:"inputModeMapping,omitempty"`
@@ -91,6 +96,10 @@ type configJSON struct {
 }
 
 func (c *Config) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.toJSON())
+}
+
+func (c *Config) toJSON() configJSON {
 	j := configJSON{
 		InputMethod:         c.InputMethod,
 		OutputCharset:       c.OutputCharset,
@@ -116,7 +125,7 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 	if j.UinputSelectApps == nil {
 		j.UinputSelectApps = []string{UinputSelectDefaultToken}
 	}
-	return json.Marshal(j)
+	return j
 }
 
 func (c *Config) UnmarshalJSON(data []byte) error {
@@ -139,12 +148,22 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	// Detect which explicit keys exist for backward-compat decisions
 	_, hasAutoNonVn := raw["autoNonVnRestore"]
 
-	var j configJSON
+	// Keys missing from the file keep the values c already holds (the
+	// defaults, when called from LoadConfig): a file written by an older
+	// version must not turn new options off.
+	j := c.toJSON()
 	if err := json.Unmarshal(data, &j); err != nil {
 		return err
 	}
-	c.InputMethod = j.InputMethod
-	c.OutputCharset = j.OutputCharset
+	if !hasAutoNonVn {
+		j.AutoNonVnRestore = j.SpellCheck
+	}
+	if j.InputMethod != "" {
+		c.InputMethod = j.InputMethod
+	}
+	if j.OutputCharset != "" {
+		c.OutputCharset = j.OutputCharset
+	}
 	c.DefaultInputMode = j.DefaultInputMode
 	c.InputModeMapping = j.InputModeMapping
 	if _, ok := raw["uinputSelectApps"]; ok {
@@ -163,10 +182,6 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	}
 	if j.SpellCheck {
 		c.IBflags |= IBspellCheckEnabled
-		// Backward compat: old configs had autoNonVnRestore tied to spellCheck
-		if !hasAutoNonVn {
-			c.IBflags |= IBautoNonVnRestore
-		}
 	}
 	if j.AutoNonVnRestore {
 		c.IBflags |= IBautoNonVnRestore
@@ -174,8 +189,6 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	if j.DdFreeStyle {
 		c.IBflags |= IBddFreeStyle
 	}
-	// WPS workaround always enabled
-	c.IBflags |= IBworkaroundForWPS
 	if j.SpellCheckByRules {
 		c.IBflags |= IBspellCheckWithRules
 	}
@@ -210,27 +223,86 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 
 // ── Shortcut helpers ──────────────────────────────────────────────
 
+// Modifier bits of a shortcut (IBus/GDK state bits). Super is stored as
+// Mod4; the GUI and IBus may also report the virtual Super/Hyper/Meta bits.
+const (
+	ModShift uint32 = 1 << 0
+	ModLock  uint32 = 1 << 1
+	ModCtrl  uint32 = 1 << 2
+	ModAlt   uint32 = 1 << 3 // Mod1
+	ModSuper uint32 = 1 << 6 // Mod4
+
+	modVirtSuper uint32 = 1 << 26
+	modVirtHyper uint32 = 1 << 27
+	modVirtMeta  uint32 = 1 << 28
+)
+
+// NormalizeMods reduces a key state to the modifiers a shortcut is made of:
+// Shift, Ctrl, Alt and Super. Caps Lock, Num Lock, the keyboard group (the
+// layout Caps Lock switches to with grp:caps_toggle) and mouse buttons are
+// dropped, so they never stop a shortcut from matching.
+func NormalizeMods(state uint32) uint32 {
+	m := state & (ModShift | ModCtrl | ModAlt)
+	if state&(ModSuper|modVirtSuper|modVirtHyper) != 0 {
+		m |= ModSuper
+	}
+	if state&modVirtMeta != 0 {
+		m |= ModAlt
+	}
+	return m
+}
+
+// Keysyms that never make a shortcut.
+const (
+	keyCapsLock  = 0xffe5
+	keySpace     = 0x20
+	keyEscape    = 0xff1b
+	keyBackSpace = 0xff08
+)
+
+// IsLockOrGroupKey: Caps/Num/Shift Lock and the ISO group/level keys. With
+// grp:caps_toggle Caps Lock sends ISO_Next_Group to switch the input source.
+func IsLockOrGroupKey(keyval uint32) bool {
+	return keyval == keyCapsLock || keyval == 0xff7f || keyval == 0xffe6 ||
+		(keyval >= 0xfe01 && keyval <= 0xfe0f)
+}
+
+// ShortcutUsable reports whether mask+keyval can be a shortcut without
+// eating ordinary typing or a system key: a printable key needs Ctrl, Alt
+// or Super; lock/group keys (the user's Caps Lock layout switch) and
+// Super+Space / Shift+Super+Space (GNOME's input source switch) are refused.
+func ShortcutUsable(mask, keyval uint32) bool {
+	if keyval == 0 || IsLockOrGroupKey(keyval) || keyval == keyEscape || keyval == keyBackSpace {
+		return false
+	}
+	m := NormalizeMods(mask)
+	if keyval == keySpace && m&ModSuper != 0 && m&(ModCtrl|ModAlt) == 0 {
+		return false
+	}
+	if (keyval >= 0x20 && keyval <= 0x7e) || (keyval >= 0xa0 && keyval <= 0xff) || keyval >= 0x1000000 {
+		return m&(ModCtrl|ModAlt|ModSuper) != 0
+	}
+	return true
+}
+
+// keyNames are the keysym names used in the JSON besides plain characters.
 var keyNames = map[string]uint32{
-	"0": 0x30, "1": 0x31, "2": 0x32, "3": 0x33, "4": 0x34,
-	"5": 0x35, "6": 0x36, "7": 0x37, "8": 0x38, "9": 0x39,
-	"A": 0x41, "B": 0x42, "C": 0x43, "D": 0x44, "E": 0x45,
-	"F": 0x46, "G": 0x47, "H": 0x48, "I": 0x49, "J": 0x4A,
-	"K": 0x4B, "L": 0x4C, "M": 0x4D, "N": 0x4E, "O": 0x4F,
-	"P": 0x50, "Q": 0x51, "R": 0x52, "S": 0x53, "T": 0x54,
-	"U": 0x55, "V": 0x56, "W": 0x57, "X": 0x58, "Y": 0x59,
-	"Z": 0x5A, "~": 0x7E, ".": 0x2E, ",": 0x2C,
+	"Space": 0x20, "Plus": 0x2b, "Tab": 0xff09, "Return": 0xff0d, "Escape": 0xff1b,
+	"BackSpace": 0xff08, "Delete": 0xffff, "Insert": 0xff63, "Home": 0xff50, "End": 0xff57,
+	"PageUp": 0xff55, "PageDown": 0xff56, "Left": 0xff51, "Up": 0xff52, "Right": 0xff53, "Down": 0xff54,
+	"Shift_L": 0xffe1, "Shift_R": 0xffe2, "Control_L": 0xffe3, "Control_R": 0xffe4,
+	"Alt_L": 0xffe9, "Alt_R": 0xffea, "Super_L": 0xffeb, "Super_R": 0xffec,
 }
 
 var revKeyNames map[uint32]string
 
 func init() {
-	revKeyNames = make(map[uint32]string, len(keyNames)*2)
+	for i := uint32(1); i <= 24; i++ {
+		keyNames[fmt.Sprintf("F%d", i)] = 0xffbd + i
+	}
+	revKeyNames = make(map[uint32]string, len(keyNames))
 	for k, v := range keyNames {
 		revKeyNames[v] = k
-		// Map lowercase keyval -> uppercase name (old-format stores lowercase keyvals)
-		if len(k) == 1 && k[0] >= 'A' && k[0] <= 'Z' {
-			revKeyNames[v+32] = k
-		}
 	}
 }
 
@@ -240,67 +312,85 @@ func parseShortcut(s string, mask, keyval *uint32) {
 	if s == "" {
 		return
 	}
-	parts := strings.Split(s, "+")
+	var parts []string
+	if strings.HasSuffix(s, "++") { // "Ctrl++" (old spelling of Plus)
+		parts = append(strings.Split(strings.TrimSuffix(s, "++"), "+"), "+")
+	} else {
+		parts = strings.Split(s, "+")
+	}
 	for i, p := range parts {
-		switch p {
-		case "Ctrl":
-			*mask |= 4
-		case "Alt":
-			*mask |= 8
-		case "Shift":
-			*mask |= 1
-		case "Super":
-			*mask |= 64
+		if i < len(parts)-1 {
+			switch strings.ToLower(p) {
+			case "ctrl", "control":
+				*mask |= ModCtrl
+			case "alt":
+				*mask |= ModAlt
+			case "shift":
+				*mask |= ModShift
+			case "super", "meta", "win":
+				*mask |= ModSuper
+			}
+			continue
+		}
+		switch {
+		case p == "":
+		case strings.HasPrefix(p, "0x") || strings.HasPrefix(p, "0X"):
+			var kv uint32
+			if _, err := fmt.Sscanf(p[2:], "%x", &kv); err == nil {
+				*keyval = kv
+			}
+		case keyNames[p] != 0:
+			*keyval = keyNames[p]
+		case len([]rune(p)) == 1:
+			// The GUI stores lower-case keysyms (gdk_keyval_to_lower).
+			r := []rune(strings.ToLower(p))[0]
+			if r < 0x100 {
+				*keyval = uint32(r)
+			} else {
+				*keyval = uint32(r) | 0x1000000
+			}
 		default:
-			if i == len(parts)-1 {
-				if kv, ok := keyNames[strings.ToUpper(p)]; ok {
-					// C code stores lowercase keyvals (gdk_keyval_to_lower)
-					if kv >= 0x41 && kv <= 0x5A {
-						*keyval = kv + 32
-					} else {
-						*keyval = kv
-					}
-				} else if len(p) == 1 {
-					kv := uint32(strings.ToUpper(p)[0])
-					if kv >= 0x30 && kv <= 0x5A {
-						if kv >= 0x41 {
-							*keyval = kv + 32
-						} else {
-							*keyval = kv
-						}
-					}
-				}
+			// "Shift" alone etc.: a modifier used as the key.
+			switch strings.ToLower(p) {
+			case "shift":
+				*keyval = 0xffe1
+			case "ctrl", "control":
+				*keyval = 0xffe3
+			case "alt":
+				*keyval = 0xffe9
+			case "super":
+				*keyval = 0xffeb
 			}
 		}
 	}
+	*mask = NormalizeMods(*mask)
 }
 
 func shortcutString(mask, keyval uint32) string {
 	if mask == 0 && keyval == 0 {
 		return ""
 	}
+	mask = NormalizeMods(mask)
 	var parts []string
-	if mask&4 != 0 {
+	if mask&ModCtrl != 0 {
 		parts = append(parts, "Ctrl")
 	}
-	if mask&8 != 0 {
+	if mask&ModAlt != 0 {
 		parts = append(parts, "Alt")
 	}
-	if mask&1 != 0 {
+	if mask&ModShift != 0 {
 		parts = append(parts, "Shift")
 	}
-	if mask&64 != 0 {
+	if mask&ModSuper != 0 {
 		parts = append(parts, "Super")
 	}
 	if keyval > 0 {
 		if name, ok := revKeyNames[keyval]; ok {
-			if keyval >= 0x41 && keyval <= 0x5A {
-				parts = append(parts, strings.ToUpper(name))
-			} else {
-				parts = append(parts, name)
-			}
-		} else if keyval >= 0x30 && keyval <= 0x39 {
-			parts = append(parts, string(rune(keyval)))
+			parts = append(parts, name)
+		} else if keyval > 0x20 && keyval <= 0x7e {
+			parts = append(parts, strings.ToUpper(string(rune(keyval))))
+		} else if keyval >= 0x1000100 && keyval <= 0x110ffff {
+			parts = append(parts, strings.ToUpper(string(rune(keyval&0xffffff))))
 		} else {
 			parts = append(parts, fmt.Sprintf("0x%04X", keyval))
 		}
@@ -311,6 +401,9 @@ func shortcutString(mask, keyval uint32) string {
 // ── Path helpers ──────────────────────────────────────────────────
 
 func GetConfigDir(ngName string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return fmt.Sprintf(configDir, home, "ktelex")
+	}
 	u, err := user.Current()
 	if err == nil {
 		return fmt.Sprintf(configDir, u.HomeDir, "ktelex")
@@ -320,11 +413,7 @@ func GetConfigDir(ngName string) string {
 
 func GetMacroPath(engineName string) string {
 	// Macro file is shared between VI and EN engines
-	master := engineName
-	if engineName == "ktelexus" || engineName == "ktelexgb" {
-		master = "ktelex"
-	}
-	return fmt.Sprintf(mactabFile, GetConfigDir("ktelex"), master)
+	return fmt.Sprintf(mactabFile, GetConfigDir("ktelex"), MasterName(engineName))
 }
 
 func GetConfigPath(engineName string) string {
@@ -362,36 +451,138 @@ func MasterName(ngName string) string {
 	return ngName
 }
 
-func LoadConfig(engineName string) *Config {
-	var c = DefaultCfg(engineName)
+// isEnEngine reports whether engineName is an EN engine, which shares the
+// per-app input mode mapping of the master (VI) config.
+func isEnEngine(engineName string) bool {
+	return engineName == "ktelexus" || engineName == "ktelexgb"
+}
 
-	data, err := ioutil.ReadFile(GetConfigPath(engineName))
+// LoadConfig returns the config of engineName. EN engines use the master's
+// per-app input mode mapping; never save such a copy back to the EN file
+// (use UpdateConfig to change a file).
+func LoadConfig(engineName string) *Config {
+	c := loadOwnConfig(engineName)
+	if isEnEngine(engineName) {
+		// Every writer stores the mapping in the master file; entries in
+		// the EN file are leftovers of an old bug that saved merged copies.
+		// The settings GUI edits the master only: hotkeys and "disable on
+		// games" come from there too.
+		m := loadOwnConfig(MasterName(engineName))
+		c.InputModeMapping = m.InputModeMapping
+		c.Shortcuts = m.Shortcuts
+		c.IBflags = c.IBflags&^IBdisableOnGame | m.IBflags&IBdisableOnGame
+	}
+	return c
+}
+
+// loadOwnConfig reads the file of engineName alone. A file that does not
+// parse is copied aside (".broken") and defaults are used, so a later save
+// does not silently destroy what the user wrote.
+func loadOwnConfig(engineName string) *Config {
+	var c = DefaultCfg(engineName)
+	path := GetConfigPath(engineName)
+	data, err := ioutil.ReadFile(path)
 	if err == nil {
-		json.Unmarshal(data, &c)
+		if perr := json.Unmarshal(data, &c); perr != nil {
+			log.Printf("config %s: parse error: %v (using defaults)", path, perr)
+			backupBrokenFile(path, data)
+			c = DefaultCfg(engineName)
+			err = perr
+		}
 	}
 	c.InputMethodDefinitions = bamboo.GetInputMethodDefinitions()
-
+	if c.InputModeMapping == nil {
+		c.InputModeMapping = map[string]int{}
+	}
 	if err == nil && isOldFormat(data) {
 		SaveConfig(&c, engineName)
 	}
-
-	// EN engine: merge InputModeMapping from VI engine's config (shared mappings)
-	if engineName == "ktelexus" || engineName == "ktelexgb" {
-		viData, viErr := ioutil.ReadFile(GetConfigPath("ktelex"))
-		if viErr == nil {
-			var viCfg Config
-			if json.Unmarshal(viData, &viCfg) == nil {
-				if c.InputModeMapping == nil {
-					c.InputModeMapping = map[string]int{}
-				}
-				for app, mode := range viCfg.InputModeMapping {
-					c.InputModeMapping[app] = mode
-				}
-			}
-		}
-	}
-
 	return &c
+}
+
+func backupBrokenFile(path string, data []byte) {
+	bak := path + ".broken"
+	if old, err := ioutil.ReadFile(bak); err == nil && string(old) == string(data) {
+		return
+	}
+	if err := WriteFileAtomic(bak, data, 0644); err != nil {
+		log.Printf("config: cannot back up %s: %v", path, err)
+	} else {
+		log.Printf("config: unreadable file saved as %s", bak)
+	}
+}
+
+// UpdateConfig loads the file of engineName (without the EN mapping
+// merge), lets fn change it and saves it, holding a lock shared with the
+// settings GUI so concurrent read-modify-write cycles do not lose updates.
+func UpdateConfig(engineName string, fn func(c *Config)) error {
+	unlock := lockConfigDir(engineName)
+	defer unlock()
+	c := loadOwnConfig(engineName)
+	fn(c)
+	return SaveConfig(c, engineName)
+}
+
+func lockConfigDir(engineName string) func() {
+	dir := GetConfigDir(engineName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return func() {}
+	}
+	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return func() {}
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return func() {}
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}
+}
+
+// WriteFileAtomic writes data to a temp file in the same directory, syncs
+// it and renames it over path, so readers never see a half-written file.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	f, err := ioutil.TempFile(dir, "."+filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ok = true
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 // isOldFormat checks whether the raw JSON uses the old opaque-bitfield format.
@@ -405,14 +596,15 @@ func isOldFormat(data []byte) bool {
 	return hasIBflags || hasOldShortcuts
 }
 
-func SaveConfig(c *Config, engineName string) {
-	fn := fmt.Sprintf(configFile, GetConfigDir(engineName), engineName)
+func SaveConfig(c *Config, engineName string) error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		log.Println("SaveConfig marshal:", err)
-		return
+		return err
 	}
-	if err := ioutil.WriteFile(fn, data, 0644); err != nil {
+	if err := WriteFileAtomic(GetConfigPath(engineName), data, 0644); err != nil {
 		log.Println("SaveConfig write:", err)
+		return err
 	}
+	return nil
 }

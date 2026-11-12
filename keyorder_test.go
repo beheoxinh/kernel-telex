@@ -16,7 +16,7 @@ func TestKeyOrderSerializesOutOfOrderHandlers(t *testing.T) {
 	k := newKeyOrderer()
 	keys := []keyTriple{{'a', 1, 0}, {'s', 2, 0}, {'x', 3, 0}, {'a', 1, 0}}
 	for _, key := range keys {
-		k.issue(key)
+		k.issue(key, 0)
 	}
 	var mu sync.Mutex
 	var got []uint32
@@ -53,9 +53,9 @@ func runeSlice(u []uint32) []rune {
 // A ticket whose call never arrives must not stall later keys for good.
 func TestKeyOrderSkipsLostTicket(t *testing.T) {
 	k := newKeyOrderer()
-	k.issue(keyTriple{'q', 0, 0}) // lost: never acquired
-	k.issue(keyTriple{'w', 0, 0})
-	k.issue(keyTriple{'e', 0, 0})
+	k.issue(keyTriple{'q', 0, 0}, 0) // lost: never acquired
+	k.issue(keyTriple{'w', 0, 0}, 0)
+	k.issue(keyTriple{'e', 0, 0}, 0)
 	start := time.Now()
 	k.release(k.acquire(keyTriple{'w', 0, 0}))
 	if d := time.Since(start); d > kKeyOrderWait+50*time.Millisecond {
@@ -71,7 +71,7 @@ func TestKeyOrderSkipsLostTicket(t *testing.T) {
 // Untracked calls (tests, other paths) never wait.
 func TestKeyOrderUntrackedNoWait(t *testing.T) {
 	k := newKeyOrderer()
-	k.issue(keyTriple{'a', 0, 0})
+	k.issue(keyTriple{'a', 0, 0}, 0)
 	if tk := k.acquire(keyTriple{'b', 0, 0}); tk != 0 {
 		t.Fatalf("untracked key got ticket %d", tk)
 	}

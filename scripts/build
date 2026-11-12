@@ -24,6 +24,4 @@ export CGO_ENABLED=1
 
 mkdir -p "${DIST}"
 go build "${GOFLAGS_COMMON[@]}" -o "${DIST}/ibus-engine-ktelex" .
-# Optional root helper (socket fallback when /dev/uinput is not writable).
-go build "${GOFLAGS_COMMON[@]}" -o "${DIST}/ktelex-uinput" ./cmd/uinput-server
 echo "Built ${DIST}/ibus-engine-ktelex (${VERSION})"

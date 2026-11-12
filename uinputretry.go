@@ -6,8 +6,7 @@ import (
 )
 
 // Background retry of the in-process uinput device. Kernel mode cannot
-// delete anything without it (unless the standalone socket server runs), so
-// a failed open at startup must not be final.
+// delete anything without it, so a failed open at startup must not be final.
 
 const (
 	kUinputRetryBase   = time.Second
@@ -51,9 +50,6 @@ func uinputOpenLoop(open func() bool, notice func(), kick <-chan struct{}, base,
 }
 
 func uinputNotifyUnavailable() {
-	if uinputTestConn() {
-		return // the socket server does the injection
-	}
 	log.Printf("[uinput] /dev/uinput still unavailable: Kernel mode cannot delete characters")
 	notifyDesktop("KTelex: chế độ Kernel chưa sẵn sàng",
 		"Không mở được /dev/uinput nên chưa xoá được ký tự khi bỏ dấu. "+

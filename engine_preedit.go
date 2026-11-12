@@ -23,6 +23,7 @@ import (
 	"ktelex/config"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BambooEngine/bamboo-core"
 	ibus "github.com/BambooEngine/goibus"
@@ -177,10 +178,72 @@ func (e *Engine) mustFallbackToEnglish() bool {
 	if e.config.IBflags&config.IBddFreeStyle != 0 && strings.ContainsRune(vnSeq, 'đ') {
 		return false
 	}
-	if e.config.IBflags&config.IBspellCheckWithDicts != 0 {
+	if e.config.IBflags&config.IBspellCheckWithDicts != 0 && dictionaryOK.Load() {
 		return !dictionary[vnSeq]
 	}
-	return !e.preeditor.IsValid(true)
+	return !e.preeditor.IsValid(true) || !vnSyllableComplete(vnSeq)
+}
+
+// vnSyllableComplete applies the rules bamboo's validator lets through for a
+// finished word: a syllable that ends in a stop (p, t, c, ch) carries sắc or
+// nặng, and ă/â are always followed by a final consonant. "loop" -> "lôp",
+// "keep" -> "kêp", "law" -> "lă" are English words, not Vietnamese.
+func vnSyllableComplete(word string) bool {
+	rs := []rune(word)
+	// The last syllable: trailing letters.
+	start := len(rs)
+	for start > 0 && unicode.IsLetter(rs[start-1]) {
+		start--
+	}
+	rs = rs[start:]
+	lastVowel := -1
+	tone := bamboo.ToneNone
+	for i, c := range rs {
+		if bamboo.IsVowel(c) {
+			lastVowel = i
+			if t := bamboo.FindToneFromChar(c); t != bamboo.ToneNone {
+				tone = t
+			}
+		}
+	}
+	if lastVowel < 0 {
+		return true
+	}
+	final := string(rs[lastVowel+1:])
+	switch final {
+	case "p", "t", "c", "ch":
+		return tone == bamboo.ToneAcute || tone == bamboo.ToneDot
+	case "":
+		base := bamboo.AddToneToChar(rs[lastVowel], 0)
+		return base != 'ă' && base != 'â'
+	}
+	return true
+}
+
+// shouldRestoreEnglish decides, at a word break, whether the word typed is
+// English and its raw keys go back in place of the Vietnamese transform:
+// "coffee" -> "coffee" not "cofê", "text" not "tẽt", "loop" not "lôp".
+// A word without any Vietnamese letter whose last key undid the one before
+// it ("ass" -> "as", "off" -> "of") is the Telex way of typing that literal
+// text and is kept.
+func (e *Engine) shouldRestoreEnglish() bool {
+	if e.config.IBflags&config.IBautoNonVnRestore == 0 {
+		return false
+	}
+	if ok, _ := e.getMacroText(); ok {
+		return false
+	}
+	vn := e.getProcessedString(bamboo.VietnameseMode | bamboo.LowerCase)
+	en := []rune(e.getProcessedString(bamboo.EnglishMode | bamboo.LowerCase))
+	if vn == string(en) || !e.mustFallbackToEnglish() {
+		return false
+	}
+	if bamboo.HasAnyVietnameseRune(vn) {
+		return true
+	}
+	// Telex idiom: the last key undid the one before it ("ass" -> "as").
+	n := len(en)
+	return n < 2 || en[n-1] != en[n-2] || vn != string(en[:n-1])
 }
 
 func (e *Engine) getComposedString(oldText string) string {

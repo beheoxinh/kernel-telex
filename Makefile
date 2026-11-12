@@ -43,11 +43,12 @@ test:
 
 clean:
 	rm -rf $(DIST)
-	rm -f $(ibus_e_name) ktelex ktelex-uinput
+	rm -f $(ibus_e_name) ktelex
 
 install: $(DIST)/$(ibus_e_name)
 	DIST=$(DIST) bash scripts/install $(PREFIX) $(DESTDIR)
 
+# Files only; ./uninstall.sh also removes the udev rule, GNOME source and extension.
 uninstall:
 	rm -rf $(DESTDIR)$(engine_dir)
 	rm -f $(DESTDIR)$(PREFIX)/libexec/$(ibus_e_name)

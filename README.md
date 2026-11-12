@@ -27,7 +27,7 @@ KTelex tối ưu trải nghiệm gõ tiếng Việt trên Wayland bằng **chế
 | **Kernel**   | `0` | *(Mặc định)* Gõ qua evdev uinput, không gạch chân. Hoạt động mượt trên mọi app Wayland, Chromium, JetBrains, Game. |
 | **Preedit**  | `1` | IBus preedit truyền thống (có gạch chân). Tự động chốt chữ khi mất focus.                                          |
 | **Surround** | `2` | Dùng IBus SurroundingText cho các ứng dụng hỗ trợ.                                                                 |
-| **Ignore**   | `3` | Tắt bộ gõ, passthrough phím gốc (thích hợp cho game và app đồ họa).                                                |
+| **Ignore**   | `7` | Tắt bộ gõ, passthrough phím gốc (thích hợp cho game và app đồ họa).                                                |
 
 > Bấm **`Alt+Z`** tại cửa sổ bất kỳ để mở bảng chọn nhanh chế độ gõ cho ứng dụng đó.
 
@@ -35,7 +35,8 @@ KTelex tối ưu trải nghiệm gõ tiếng Việt trên Wayland bằng **chế
 
 ## ⌨️ Phím tắt & Tiện ích
 
-- **Đổi chế độ gõ cho app**: `Alt+Z`
+- **Chuyển Anh/Việt**: phím chuyển nguồn nhập của GNOME (`Super+Space`, hoặc `Caps Lock` nếu bật `grp:caps_toggle`). KTelex luôn để Caps Lock/phím đổi nhóm đi thẳng tới hệ thống, không bao giờ chặn.
+- **Đổi chế độ gõ cho app**: `Alt+Z`. Phím tắt phải có Ctrl/Alt/Super (phím chữ trơn, Caps Lock, Esc, Backspace, Super+Space bị từ chối để không xung đột).
 - **Macro (Gõ tắt)**: Cấu hình tại `~/.config/ibus-ktelex/ibus-ktelex.macro.text` theo dạng `vt:cụm từ`. Tự động giữ nguyên kiểu viết hoa (VD: `VT` → `CỤM TỪ`).
 - **Emoji**: Gõ `:` kèm từ khóa tiếng Anh (VD: `:smile`, `:heart`) rồi bấm số hoặc Enter để chọn.
 
@@ -61,12 +62,16 @@ Chạy `./install.sh` bằng user thường (script tự gọi `sudo` khi cần)
 KTelex được thêm sẵn vào nguồn nhập: bấm `Super+Space` để chuyển. Lần cài đầu
 tiên có thể cần đăng xuất/đăng nhập lại một lần để quyền nhóm `input` có hiệu lực.
 
-Gỡ cài đặt: `sudo make uninstall`.
+Trên GNOME Wayland, `install.sh` cài thêm extension `wmclass-helper@local` để
+KTelex biết cửa sổ đang focus (chế độ gõ theo app, nhận diện game). Extension
+mới chỉ được nạp sau khi đăng xuất/đăng nhập lại.
+
+Gỡ cài đặt: `./uninstall.sh` (thêm `--purge` để xoá cả cấu hình, macro, log).
 
 ### Lệnh phát triển
 
 ```bash
-make build        # build ra dist/ibus-engine-ktelex (+ dist/ktelex-uinput)
+make build        # build ra dist/ibus-engine-ktelex
 make test         # toàn bộ test suite, kèm race detector
 make clean        # xoá dist/
 ```
@@ -74,7 +79,9 @@ make clean        # xoá dist/
 `vendor/` được commit kèm repo (bamboo-core bản rút gọn, chỉ Telex), nên build
 không cần tải module từ mạng.
 
-*Log chẩn đoán: `/tmp/ktelex.log` (khi chạy engine IBus).*
+*Log chẩn đoán: `~/.local/state/ktelex/ktelex.log` (tự xoay vòng ở 8 MB). Log chi
+tiết từng phím (có thể chứa chữ đã gõ) chỉ bật khi đặt `KTELEX_DEBUG=1` hoặc tạo
+file rỗng `~/.config/ibus-ktelex/debug`, rồi chạy `ibus restart`.*
 
 ---
 

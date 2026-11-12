@@ -27,6 +27,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -41,7 +42,7 @@ var dictionary = map[string]bool{}
 var emojiTrie = NewTrie()
 
 func GetIBusEngineCreator() func(*dbus.Conn, string) dbus.ObjectPath {
-	go keyPressCapturing()
+	startSurroundWorker()
 
 	return func(conn *dbus.Conn, ngName string) dbus.ObjectPath {
 		var ngGroupName = strings.Split(ngName, "::")[0]
@@ -73,7 +74,7 @@ func (e *Engine) isShortcutKeyEnable(ski uint) bool {
 		return false
 	}
 	l := e.config.Shortcuts[ski : ski+2]
-	return l[1] > 0
+	return l[1] > 0 && config.ShortcutUsable(l[0], l[1])
 }
 
 func (e *Engine) init() {
@@ -121,21 +122,56 @@ type keyPressEvent struct {
 }
 
 var keyPressChan = make(chan keyPressEvent, 100)
-var lenKeyChan int32
+
+// surroundInflight counts keys queued for, or being handled by, the
+// surrounding-text worker. A key handled synchronously waits until it is 0,
+// so it never overtakes a queued key.
+var surroundInflight int32
+
+var surroundWorkerOnce sync.Once
+
+func startSurroundWorker() { surroundWorkerOnce.Do(func() { go keyPressCapturing() }) }
 
 func keyPressCapturing() {
 	for ev := range keyPressChan {
-		atomic.StoreInt32(&lenKeyChan, int32(len(keyPressChan)))
-		ev.e.keyPressForwardHandler(ev.keyVal, ev.keyCode, ev.state)
-		atomic.AddInt32(&lenKeyChan, -1)
+		ev.e.runSurroundKey(ev)
 	}
 }
 
-var sleep = func() {
-	var i = 0
-	for i < 10 && atomic.LoadInt32(&lenKeyChan) > 0 {
-		i++
-		time.Sleep(5 * time.Millisecond)
+// runSurroundKey handles one queued key under the engine lock. A panic in
+// bamboo must not take the whole ibus-engine process down with it.
+func (e *Engine) runSurroundKey(ev keyPressEvent) {
+	defer atomic.AddInt32(&surroundInflight, -1)
+	e.Lock()
+	defer e.Unlock()
+	defer e.recoverKeyPanicLocked("surrounding-text worker")
+	e.keyPressForwardHandler(ev.keyVal, ev.keyCode, ev.state)
+}
+
+// recoverKeyPanicLocked (deferred) turns a panic in key handling into a
+// logged error and a fresh composer.
+func (e *Engine) recoverKeyPanicLocked(where string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	log.Printf("%s: recovered from panic: %v", where, r)
+	e.recoverResetComposerLocked()
+}
+
+func (e *Engine) recoverResetComposerLocked() {
+	im := bamboo.ParseInputMethod(e.config.InputMethodDefinitions, e.config.InputMethod)
+	if im.Name == "" {
+		im = bamboo.ParseInputMethod(e.config.InputMethodDefinitions, bamboo.DefaultInputMethodName)
+	}
+	e.preeditor = bamboo.NewEngine(im, e.config.Flags)
+}
+
+// waitSurroundIdle waits (bounded) until the worker has no queued keys.
+// Must be called without the engine lock: the worker needs it.
+func waitSurroundIdle() {
+	for i := 0; i < 100 && atomic.LoadInt32(&surroundInflight) > 0; i++ {
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -165,9 +201,9 @@ func (e *Engine) resetBuffer() {
 }
 
 func (e *Engine) checkWmClass(newId string) {
-	if newId == "" || isSameWmClass(e.wmClasses, newId) {
+	if newId == "" || isSameWmClass(e.getWmClass(), newId) {
 		if newId != "" {
-			e.wmClasses = newId
+			e.setWmClass(newId)
 		}
 		return
 	}
@@ -177,18 +213,20 @@ func (e *Engine) checkWmClass(newId string) {
 	if norm == "gjs" || norm == "org.gnome.shell" || norm == "org.gnome.overview" {
 		return
 	}
-	e.wmClasses = newId
-	e.resetBuffer()
+	e.setWmClass(newId)
+	if !e.uinputTxOpenLocked() { // an open uinput tx is settled by uinputOnFocusIn
+		e.resetBuffer()
+	}
 }
 
 func (e *Engine) isShortcutKeyPressed(keyVal, state uint32, shortcut uint) bool {
 	if !e.isShortcutKeyEnable(shortcut) {
 		return false
 	}
-	realState := state & IBusDefaultModMask
+	realState := config.NormalizeMods(state)
 	lowerKey := uint32(unicode.ToLower(rune(keyVal)))
 	shortcuts := e.config.Shortcuts[shortcut : shortcut+2]
-	ret := shortcuts[0] == realState && shortcuts[1] == lowerKey
+	ret := config.NormalizeMods(shortcuts[0]) == realState && shortcuts[1] == lowerKey
 	// fmt.Println("...isShortcutKeyPressed=", ret, ret && !e.lastKeyWithShift, shortcuts)
 	if realState == 1 && shortcut == KSViEnSwitch {
 		return ret && !e.lastKeyWithShift
@@ -197,7 +235,7 @@ func (e *Engine) isShortcutKeyPressed(keyVal, state uint32, shortcut uint) bool 
 }
 
 func (e *Engine) processShortcutKey(keyVal, keyCode, state uint32) (bool, bool) {
-	if keyVal == IBusCapsLock {
+	if config.IsLockOrGroupKey(keyVal) {
 		return true, false
 	}
 	// fmt.Println("===Process shortcut for emoji selector")
@@ -232,7 +270,7 @@ func (e *Engine) processShortcutKey(keyVal, keyCode, state uint32) (bool, bool) 
 		}
 		if e.isShortcutKeyPressed(keyVal, state, KSViEnSwitch) {
 			e.englishMode = !e.englishMode
-			notify(e.englishMode)
+			go notify(e.englishMode) // D-Bus round trip: not under the engine lock
 			e.resetBuffer()
 			return true, true
 		}
@@ -251,16 +289,24 @@ func (e *Engine) processShortcutKey(keyVal, keyCode, state uint32) (bool, bool) 
 	return false, false
 }
 
+// toUpper: with Caps Lock on, Telex 2's bracket keys type the capital
+// letter ({ } for Ơ Ư).
 func (e *Engine) toUpper(keyRune rune) rune {
-	var keyMapping = map[rune]rune{
-		'[': '{',
-		']': '}',
-		'{': '[',
-		'}': ']',
+	var upper rune
+	switch keyRune {
+	case '[':
+		upper = '{'
+	case ']':
+		upper = '}'
+	case '{':
+		upper = '['
+	case '}':
+		upper = ']'
+	default:
+		return keyRune
 	}
-
-	if upperSpecialKey, found := keyMapping[keyRune]; found && inKeyList(e.preeditor.GetInputMethod().AppendingKeys, keyRune) {
-		keyRune = upperSpecialKey
+	if inKeyList(e.preeditor.GetInputMethod().AppendingKeys, keyRune) {
+		return upper
 	}
 	return keyRune
 }
@@ -333,7 +379,7 @@ func (e *Engine) computeInputMode(wm string) int {
 			return config.UinputIM
 		}
 	}
-	if e.config.IBflags&config.IBdisableOnGame != 0 && e.isGame {
+	if e.config.IBflags&config.IBdisableOnGame != 0 && e.isGameNow() {
 		return config.UsIM
 	}
 	im = migrateInputMode(e.config.DefaultInputMode)
@@ -449,14 +495,12 @@ func (e *Engine) commitInputModeCandidate() {
 	// Always persist mappings to the master (VI) config so both engines
 	// share per-app input mode settings (the VI engine picks the file
 	// change up on its next FocusIn).
-	master := config.MasterName(e.engineName)
-	masterCfg := config.LoadConfig(master)
-	if masterCfg.InputModeMapping == nil {
-		masterCfg.InputModeMapping = map[string]int{}
-	}
-	masterCfg.InputModeMapping[e.getWmClass()] = im
-	config.SaveConfig(masterCfg, master)
-	e.configMtime_ = configFilesMtime(e.engineName)
+	pending := configFilesMtime(e.engineName).After(e.configMtime_)
+	wm := e.getWmClass()
+	config.UpdateConfig(config.MasterName(e.engineName), func(c *config.Config) {
+		c.InputModeMapping[wm] = im
+	})
+	e.syncConfigMtimeLocked(pending)
 
 	e.propList = GetPropListByConfig(e.config)
 	e.RegisterProperties(e.propList)
@@ -573,7 +617,7 @@ func (e *Engine) handleNonVnWord(keyVal, keyCode, state uint32) string {
 	if isPrintableKey {
 		keyS = string(keyRune)
 	}
-	if bamboo.HasAnyVietnameseRune(oldText) && e.mustFallbackToEnglish() {
+	if e.shouldRestoreEnglish() {
 		e.preeditor.RestoreLastWord(false)
 		newText := e.preeditor.GetProcessedString(bamboo.PunctuationMode|bamboo.EnglishMode) + keyS
 		if isPrintableKey {
@@ -626,19 +670,48 @@ func (e *Engine) inBrowserList() bool {
 }
 
 func (e *Engine) getWmClass() string {
+	e.wmMu.Lock()
+	defer e.wmMu.Unlock()
 	return e.wmClasses
 }
+
+func (e *Engine) setWmClass(wm string) {
+	e.wmMu.Lock()
+	e.wmClasses = wm
+	e.wmMu.Unlock()
+}
+
+func (e *Engine) isGameNow() bool {
+	e.wmMu.Lock()
+	defer e.wmMu.Unlock()
+	return e.isGame
+}
+
+func (e *Engine) setGame(on bool) {
+	e.wmMu.Lock()
+	e.isGame = on
+	e.wmMu.Unlock()
+}
+
+var gnomeNoFocusWarned atomic.Bool
 
 func (e *Engine) getLatestWmClass() string {
 	var wmClass string
 	if isGnome {
 		wmClass, _ = gnomeGetFocusWindowClass()
 	}
-	if wmClass == "" && isWayland {
-		wmClass = wlAppId
+	if wmClass == "" && isWayland && !isGnome {
+		wmClass = wlAppId()
 	}
-	if wmClass == "" {
+	// On GNOME Wayland only Xwayland windows are visible to X11, and the
+	// shell already answered: asking X11 would report a stale X window.
+	if wmClass == "" && !(isWayland && isGnome) {
 		wmClass = x11GetFocusWindowClass()
+	}
+	if wmClass == "" && isWayland && isGnome && gnomeNoFocusWarned.CompareAndSwap(false, true) {
+		log.Printf("GNOME: cannot read the focused window; per-app modes and game detection need the " +
+			"wmclass-helper@local shell extension (installed by install.sh; enable it with " +
+			"`gnome-extensions enable wmclass-helper@local` and log in again)")
 	}
 	wmClass = strings.Replace(wmClass, "\"", "", -1)
 	return wmClass

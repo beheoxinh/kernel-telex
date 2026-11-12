@@ -20,12 +20,12 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os/exec"
 	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BambooEngine/bamboo-core"
@@ -42,7 +42,8 @@ type Engine struct {
 	engineName           string
 	config               *config.Config
 	propList             *ibus.PropList
-	respectAppMapping    bool // EN engine ignores per-app InputModeMapping
+	propsShown_          *ibus.PropList // last list sent by FocusIn (see focusPropsOwner)
+	respectAppMapping    bool           // EN engine ignores per-app InputModeMapping
 	englishMode          bool
 	macroTable           *MacroTable
 	wmClasses            string
@@ -76,6 +77,7 @@ type Engine struct {
 	uinputLastWm_           string      // wmClass that "owns" the current preedit
 	uinputTxID_             uint64      // generation counter for the active transaction
 	uinputTxEndAt_          time.Time   // when the last transaction ended (stray-BS guard window)
+	uinputDstAt_            time.Time   // when the last surrounding-text replace was sent
 	uinputLastIdleBsAt_     time.Time   // timestamp of last idle backspace received
 	uinputIdleBsBurstCount_ int         // consecutive rapid backspaces received while idle (runaway guard)
 	emoji                   *EmojiEngine
@@ -93,10 +95,13 @@ type Engine struct {
 	uinputSurrBefore_       string       // text before the caret in the last surrounding text (no selection)
 	uinputSurrValid_        bool         // uinputSurrBefore_ describes the field (caret, no selection)
 	uinputDstCheck_         *dstCheck    // pending self-check of the last surrounding-text replace
+	uinputSurrSel_          bool         // the last surrounding text had a selection
+	uinputSurrAny_          bool         // the app reported surrounding text since FocusIn (even empty)
+	uinputAwait_            *dstAwait    // replace waiting for fresh surrounding text (fast typing)
 	configMtime_            time.Time    // newest mtime of the config files when last loaded
 	configGen_              uint64       // bumped on every config change (atomic)
 	imCacheMu               sync.Mutex   // guards imCache
-	preeditMu               sync.Mutex   // serialises Preedit-mode keys vs. Reset/FocusOut
+	wmMu                    sync.Mutex   // guards wmClasses and isGame (read per key, also outside the engine lock)
 	imCache                 inputModeKey // last getInputMode() inputs
 	imCacheMode             int          // and its result
 }
@@ -130,24 +135,101 @@ Return:
 
 This function gets called whenever a key is pressed.
 */
-func (e *Engine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (bool, *dbus.Error) {
+func (e *Engine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (handled bool, dbusErr *dbus.Error) {
+	// godbus runs each call in its own goroutine: a panic here would kill the
+	// whole engine process. Pass the key through and start clean instead.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ProcessKeyEvent: recovered from panic: %v", r)
+			if e.TryLock() {
+				e.uinputResetTxStateLocked()
+				e.recoverResetComposerLocked()
+				e.Unlock()
+			}
+			handled, dbusErr = false, nil
+		}
+	}()
 	if state&IBusReleaseMask != 0 {
 		return false, nil
 	}
 	ticket := keyOrder.acquire(keyTriple{keyVal, keyCode, state})
 	defer keyOrder.release(ticket)
+	// Text this key commits must not reach the app before the previous
+	// key's reply (a passed-through character) does: wait until it is out.
+	replyOrder.waitBefore(keyOrder.replySeq(ticket))
+
+	// Keys without a keysym (e.g. the click-to-unstick KEY_UNKNOWN tap)
+	// carry no text: pass them through untouched.
+	if keyVal == 0 || keyVal == IBusVoidSymbol {
+		return false, nil
+	}
+	// Caps Lock and the layout group keys belong to the system: with
+	// grp:caps_toggle Caps Lock switches the input source (VI <-> EN).
+	// Never consume or reorder them.
+	if config.IsLockOrGroupKey(keyVal) {
+		return false, nil
+	}
+	if unstickRiskKey(keyVal) {
+		unstickNoteRisk()
+	}
 
 	// Password/PIN fields: never transform, inject or log anything.
 	if e.isSecretInput() {
 		return false, nil
 	}
-	debugf(">>>>ProcessKeyEvent > %d | state %d keyVal 0x%04x | %c", len(keyPressChan), state, keyVal, rune(keyVal))
+	debugf(">>>>ProcessKeyEvent > %d | state %d keyVal 0x%04x | %c", atomic.LoadInt32(&surroundInflight), state, keyVal, rune(keyVal))
 
+	// Everything below reads or changes the composer, the lookup tables and
+	// the config, which FocusIn, timers and menu actions change too: hold the
+	// engine lock. The uinput and surrounding-text paths take it themselves.
+	switch path, ret := e.processKeyFront(keyVal, keyCode, state); path {
+	case keyPathSurround:
+		return e.bsProcessKeyEvent(keyVal, keyCode, state)
+	case keyPathUinput:
+		return e.uinputProcessKeyEvent(keyVal, keyCode, state)
+	default:
+		return ret, nil
+	}
+}
+
+// focusPropsOwner is the engine whose property list the panel shows.
+var focusPropsOwner atomic.Pointer[Engine]
+
+type keyPath int
+
+const (
+	keyPathDone keyPath = iota // handled (Preedit mode, shortcuts, EN engine)
+	keyPathSurround
+	keyPathUinput
+)
+
+// processKeyFront runs the shared prelude and the Preedit path under the
+// engine lock; the uinput and surrounding-text paths take it themselves.
+func (e *Engine) processKeyFront(keyVal, keyCode, state uint32) (path keyPath, ret bool) {
+	e.Lock()
+	defer e.Unlock()
+	defer e.recoverKeyPanicLocked("key")
+	if done, r := e.keyPreludeLocked(keyVal, keyCode, state); done {
+		return keyPathDone, r
+	}
+	if e.inBackspaceWhiteList() {
+		return keyPathSurround, false
+	}
+	if e.checkInputMode(config.UinputIM) {
+		return keyPathUinput, false
+	}
+	r, _ := e.preeditProcessKeyEvent(keyVal, keyCode, state)
+	return keyPathDone, r
+}
+
+// keyPreludeLocked handles what comes before the input-mode specific paths:
+// the EN engine, shortcuts, lookup tables and the Enter fast path.
+func (e *Engine) keyPreludeLocked(keyVal, keyCode, state uint32) (done, ret bool) {
 	// EN engine: pure passthrough. Only Alt+Z opens popup to configure VI engine.
 	if e.engineName == "ktelexus" || e.engineName == "ktelexgb" {
 		if e.isInputModeLTOpened {
 			_, ret := e.ltProcessKeyEvent(keyVal, keyCode, state)
-			return ret, nil
+			return true, ret
 		}
 		if e.isShortcutKeyPressed(keyVal, state, KSInputModeSwitch) && e.getWmClass() != "" {
 			e.resetBuffer()
@@ -158,34 +240,26 @@ func (e *Engine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (b
 				currentMode = -1
 			}
 			e.openLookupTableWithMode(currentMode)
-			return true, nil
+			return true, true
 		}
-		return false, nil
+		return true, false
 	}
 
 	if ret, retValue := e.processShortcutKey(keyVal, keyCode, state); ret {
-		return retValue, nil
+		return true, retValue
 	}
 
 	// Fast-path: In games or when buffer is empty, immediately forward Enter key (IBusReturn / IBusKP_Enter)
 	// to avoid focus-grab race conditions in game chat inputs.
 	if keyVal == IBusReturn || keyVal == IBusKP_Enter {
-		if e.isGame || e.getRawKeyLen() == 0 {
-			if e.getRawKeyLen() > 0 {
+		if e.isGameNow() || e.getRawKeyLen() == 0 {
+			if e.getRawKeyLen() > 0 && !e.uinputTxOpenLocked() {
 				e.resetBuffer()
 			}
-			return false, nil
+			return true, false
 		}
 	}
-	if e.inBackspaceWhiteList() {
-		return e.bsProcessKeyEvent(keyVal, keyCode, state)
-	}
-	if e.checkInputMode(config.UinputIM) {
-		return e.uinputProcessKeyEvent(keyVal, keyCode, state)
-	}
-	e.preeditMu.Lock()
-	defer e.preeditMu.Unlock()
-	return e.preeditProcessKeyEvent(keyVal, keyCode, state)
+	return false, false
 }
 
 func (e *Engine) FocusIn() *dbus.Error {
@@ -199,16 +273,30 @@ func (e *Engine) FocusIn() *dbus.Error {
 	if e.checkInputMode(config.UinputIM) {
 		e.uinputOnFocusIn(latestWm)
 	}
-	e.checkWmClass(latestWm)
+	game, setGame := false, true
 	if e.config.IBflags&config.IBdisableOnGame != 0 {
 		// Empty WM_CLASS shows up on transient flaps: keep the last verdict.
 		if latestWm != "" {
-			e.isGame = isGameWindow(latestWm)
+			game = isGameWindow(latestWm) // may read /proc: outside the lock
+		} else {
+			setGame = false
 		}
-	} else {
-		e.isGame = false
 	}
-	e.RegisterProperties(e.propList)
+	e.Lock()
+	e.checkWmClass(latestWm)
+	if setGame {
+		e.setGame(game)
+	}
+	props := e.propList
+	// Apps such as ONLYOFFICE flap FocusOut/FocusIn many times a second.
+	// The panel still shows this engine's list if no other engine took the
+	// focus since and the list did not change: skip the D-Bus signal then.
+	resend := focusPropsOwner.Swap(e) != e || e.propsShown_ != props
+	e.propsShown_ = props
+	e.Unlock()
+	if resend {
+		e.RegisterProperties(props)
+	}
 	e.RequireSurroundingText()
 	if e.isShortcutKeyEnable(KSEmojiDialog) {
 		ensureEmojiTrie()
@@ -230,9 +318,9 @@ func (e *Engine) FocusOut() *dbus.Error {
 	}
 	// Commit pending preedit to the losing window now (Bamboo PR #611);
 	// otherwise the uncommitted composing text is dropped or leaks into the next window.
-	e.preeditMu.Lock()
+	e.Lock()
+	defer e.Unlock()
 	e.resetBuffer()
-	e.preeditMu.Unlock()
 	if e.isEmojiLTOpened {
 		e.closeEmojiCandidates()
 	}
@@ -245,11 +333,19 @@ func (e *Engine) FocusOut() *dbus.Error {
 func (e *Engine) Reset() *dbus.Error {
 	debugf("Reset.")
 	if e.checkInputMode(config.PreeditIM) {
-		e.preeditMu.Lock()
+		e.Lock()
 		e.preeditor.Reset()
-		e.preeditMu.Unlock()
+		e.Unlock()
 	} else if e.checkInputMode(config.UinputIM) {
 		e.uinputOnReset()
+	} else if e.checkInputMode(config.SurroundingTextIM) {
+		// The caret moved (click, app edit): forget the syllable and rebuild
+		// it from the next surrounding text, or the next tone key would
+		// delete characters at the new position.
+		e.Lock()
+		e.preeditor.Reset()
+		e.isSurroundingTextReady = true
+		e.Unlock()
 	}
 	return nil
 }
@@ -257,13 +353,17 @@ func (e *Engine) Reset() *dbus.Error {
 func (e *Engine) Enable() *dbus.Error {
 	log.Printf("Enable %s", e.engineName)
 	noteEngineActive(e.engineName)
+	focusPropsOwner.Store(nil)
+	e.Lock()
 	e.preeditor.Reset()
+	e.Unlock()
 	e.RequireSurroundingText()
 	return nil
 }
 
 func (e *Engine) Disable() *dbus.Error {
-	fmt.Print("Disable.\n")
+	debugf("Disable %s", e.engineName)
+	focusPropsOwner.Store(nil)
 	e.Lock()
 	// Switching away mid-transaction: the deletion is already on its way,
 	// so commit the replacement now rather than leaving the word truncated.
@@ -288,18 +388,17 @@ func (e *Engine) SetSurroundingText(text dbus.Variant, cursorPos uint32, anchorP
 		}
 		return nil
 	}
-	if !e.isSurroundingTextReady {
-		//fmt.Println("Surrounding Text is not ready yet.")
-		return nil
-	}
 	e.Lock()
 	defer func() {
-		e.Unlock()
 		e.isSurroundingTextReady = false
+		e.Unlock()
 		if err := recover(); err != nil {
-			fmt.Println(err)
+			log.Printf("SetSurroundingText: recovered: %v", err)
 		}
 	}()
+	if !e.isSurroundingTextReady {
+		return nil
+	}
 	if e.inBackspaceWhiteList() {
 		var str = reflect.ValueOf(reflect.ValueOf(text.Value()).Index(2).Interface()).String()
 		var s = []rune(str)
@@ -321,6 +420,8 @@ func (e *Engine) SetSurroundingText(text dbus.Variant, cursorPos uint32, anchorP
 }
 
 func (e *Engine) PageUp() *dbus.Error {
+	e.Lock()
+	defer e.Unlock()
 	if e.isEmojiLTOpened && e.emojiLookupTable.PageUp() {
 		e.updateEmojiLookupTable()
 	}
@@ -331,6 +432,8 @@ func (e *Engine) PageUp() *dbus.Error {
 }
 
 func (e *Engine) PageDown() *dbus.Error {
+	e.Lock()
+	defer e.Unlock()
 	if e.isEmojiLTOpened && e.emojiLookupTable.PageDown() {
 		e.updateEmojiLookupTable()
 	}
@@ -341,6 +444,8 @@ func (e *Engine) PageDown() *dbus.Error {
 }
 
 func (e *Engine) CursorUp() *dbus.Error {
+	e.Lock()
+	defer e.Unlock()
 	if e.isEmojiLTOpened && e.emojiLookupTable.CursorUp() {
 		e.updateEmojiLookupTable()
 	}
@@ -351,6 +456,8 @@ func (e *Engine) CursorUp() *dbus.Error {
 }
 
 func (e *Engine) CursorDown() *dbus.Error {
+	e.Lock()
+	defer e.Unlock()
 	if e.isEmojiLTOpened && e.emojiLookupTable.CursorDown() {
 		e.updateEmojiLookupTable()
 	}
@@ -361,6 +468,8 @@ func (e *Engine) CursorDown() *dbus.Error {
 }
 
 func (e *Engine) CandidateClicked(index uint32, button uint32, state uint32) *dbus.Error {
+	e.Lock()
+	defer e.Unlock()
 	if e.isEmojiLTOpened && e.updateCursorPosInEmojiTable(index) {
 		e.commitEmojiCandidate()
 		e.closeEmojiCandidates()
@@ -426,6 +535,7 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 	e.Lock()
 	defer e.Unlock()
 	oldInputMethod, oldFlags := e.config.InputMethod, e.config.Flags
+	before := *e.config
 
 	turnSpellChecking := func(on bool) {
 		if on {
@@ -493,19 +603,10 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 		if propState == ibus.PROP_STATE_CHECKED {
 			e.config.IBflags |= config.IBdisableOnGame
 			wm := e.getWmClass()
-			if isGameByWmClass(wm) {
-				e.isGame = true
-				log.Printf("[gameDetect] input disabled by WM_CLASS %q", wm)
-			} else {
-				pid := getFocusedPID(wm)
-				e.isGame = isGameProcess(pid)
-				if e.isGame {
-					log.Printf("[gameDetect] input disabled for current PID %d (%s)", pid, wm)
-				}
-			}
+			e.setGame(wm != "" && isGameWindow(wm))
 		} else {
 			e.config.IBflags &= ^config.IBdisableOnGame
-			e.isGame = false
+			e.setGame(false)
 		}
 	}
 	if propName == PropKeyAutoCapitalizeMacro {
@@ -531,7 +632,7 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 		e.config.InputMethod = propName
 	}
 	if propName != "-" {
-		config.SaveConfig(e.config, e.engineName)
+		e.persistConfigChangeLocked(&before)
 	}
 	e.propList = GetPropListByConfig(e.config)
 
@@ -544,7 +645,6 @@ func (e *Engine) PropertyActivate(propName string, propState uint32) *dbus.Error
 		e.uinputResetTxStateLocked()
 		e.preeditor = bamboo.NewEngine(inputMethod, e.config.Flags)
 	}
-	e.configMtime_ = configFilesMtime(e.engineName)
 	e.bumpConfigGen()
 	e.RegisterProperties(e.propList)
 	return nil

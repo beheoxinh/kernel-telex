@@ -30,7 +30,8 @@ func hasGnome(env string) bool {
 // connectIBus is ibus.NewBus with the key-ordering interceptor installed
 // (see keyorder.go), and errors returned instead of panicking.
 func connectIBus() (*dbus.Conn, error) {
-	conn, err := dbus.Dial(ibus.GetAddress(), dbus.WithIncomingInterceptor(keyOrderInterceptor))
+	conn, err := dbus.Dial(ibus.GetAddress(), dbus.WithIncomingInterceptor(keyOrderInterceptor),
+		dbus.WithOutgoingInterceptor(replyOrderOutgoing))
 	if err != nil {
 		return nil, err
 	}
@@ -56,13 +57,13 @@ func main() {
 	if *embedded {
 		os.Chdir(DataDir)
 		// Redirect log output to file for debugging
-		f, err := openLogFile("/tmp/ktelex.log")
+		f, err := openLogFile(logFilePath())
 		if err == nil {
 			log.SetOutput(f)
 		}
 	}
-	if isWayland && !isGnome {
-		go wlGetFocusWindowClass()
+	if isWayland && !isGnome && *embedded {
+		go wlTrackFocus()
 	}
 	if *version {
 		fmt.Println(Version)

@@ -24,6 +24,6 @@ install -d "${engine_dir}" "${libexec_dir}" "${component_dir}" "${apps_dir}"
 rm -rf "${engine_dir}/data" "${engine_dir}/icons"
 cp -R icons data "${engine_dir}/"
 install -m 0755 "${DIST}/ibus-engine-${engine_name}" "${libexec_dir}/"
-[ -x "${DIST}/ktelex-uinput" ] && install -m 0755 "${DIST}/ktelex-uinput" "${libexec_dir}/"
+rm -f "${libexec_dir}/ktelex-uinput" # removed helper of older releases
 install -m 0644 "data/${engine_name}.xml" "${component_dir}/"
 install -m 0644 "data/ibus-setup-KTelex.desktop" "${apps_dir}/"

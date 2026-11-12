@@ -1,0 +1,8 @@
+{
+  "uuid": "wmclass-helper@local",
+  "name": "WMClass Helper",
+  "description": "Exposes focused window WM_CLASS via D-Bus for input methods",
+  "version": 1,
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51", "52", "53", "54"],
+  "url": ""
+}

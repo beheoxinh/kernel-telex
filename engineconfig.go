@@ -50,13 +50,11 @@ func (e *Engine) applyConfigLocked(cfg *config.Config) {
 		autoCap := cfg.IBflags&config.IBautoCapitalizeMacro != 0
 		switch {
 		case on && !wasOn:
-			e.macroTable.autoCapitalizeMacro = autoCap
-			e.macroTable.Enable(e.engineName)
+			e.macroTable.Reload(e.engineName, autoCap)
 		case !on && wasOn:
 			e.macroTable.Disable()
-		case on && autoCap != e.macroTable.autoCapitalizeMacro:
-			e.macroTable.autoCapitalizeMacro = autoCap
-			e.macroTable.LoadFromFile(config.GetMacroPath(e.engineName))
+		case on:
+			e.macroTable.SetAutoCapitalize(e.engineName, autoCap)
 		}
 	}
 	if cfg.IBflags&config.IBspellCheckWithDicts != 0 {
@@ -66,6 +64,41 @@ func (e *Engine) applyConfigLocked(cfg *config.Config) {
 	e.propList = GetPropListByConfig(cfg)
 	e.configMtime_ = configFilesMtime(e.engineName)
 	e.bumpConfigGen()
+}
+
+// persistConfigChangeLocked writes the fields that changed in memory since
+// before to the engine's own file, on top of what is on disk now, so changes
+// the settings GUI made meanwhile survive and an EN engine never writes the
+// per-app mapping it merged in from the VI config.
+func (e *Engine) persistConfigChangeLocked(before *config.Config) {
+	cur := e.config
+	pending := configFilesMtime(e.engineName).After(e.configMtime_)
+	config.UpdateConfig(e.engineName, func(c *config.Config) {
+		mergeBits := func(disk, old, now uint) uint {
+			changed := old ^ now
+			return disk&^changed | now&changed
+		}
+		c.Flags = mergeBits(c.Flags, before.Flags, cur.Flags)
+		c.IBflags = mergeBits(c.IBflags, before.IBflags, cur.IBflags)
+		if cur.DefaultInputMode != before.DefaultInputMode {
+			c.DefaultInputMode = cur.DefaultInputMode
+		}
+		if cur.OutputCharset != before.OutputCharset {
+			c.OutputCharset = cur.OutputCharset
+		}
+		if cur.InputMethod != before.InputMethod {
+			c.InputMethod = cur.InputMethod
+		}
+	})
+	e.syncConfigMtimeLocked(pending)
+}
+
+// syncConfigMtimeLocked records the files' mtime after our own write, unless
+// another writer had changed them before: then the next FocusIn reloads.
+func (e *Engine) syncConfigMtimeLocked(pending bool) {
+	if !pending {
+		e.configMtime_ = configFilesMtime(e.engineName)
+	}
 }
 
 // reloadConfigIfChanged reloads the config when a file is newer than the
@@ -83,6 +116,8 @@ func (e *Engine) reloadConfigIfChanged() bool {
 	log.Printf("config changed on disk: reloading %s", e.engineName)
 	e.applyConfigLocked(config.LoadConfig(e.engineName))
 	e.RegisterProperties(e.propList)
+	e.propsShown_ = e.propList
+	focusPropsOwner.Store(e)
 	return true
 }
 
@@ -145,7 +180,7 @@ type inputModeKey struct {
 }
 
 func (e *Engine) getInputMode() int {
-	key := inputModeKey{true, e.getWmClass(), e.isGame, atomic.LoadUint64(&e.configGen_)}
+	key := inputModeKey{true, e.getWmClass(), e.isGameNow(), atomic.LoadUint64(&e.configGen_)}
 	e.imCacheMu.Lock()
 	if e.imCache == key {
 		im := e.imCacheMode

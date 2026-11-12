@@ -10,8 +10,9 @@ import "C"
 
 import (
 	"fmt"
-	"io/ioutil"
 	"ktelex/config"
+	"log"
+	"os"
 	"unsafe"
 
 	"github.com/BambooEngine/bamboo-core"
@@ -19,103 +20,91 @@ import (
 
 var engineName string
 
-//export saveFlags
-func saveFlags(flags C.guint) {
-	if flags == 0 {
-		return
+func update(fn func(c *config.Config)) {
+	if err := config.UpdateConfig(engineName, fn); err != nil {
+		log.Printf("settings: save failed: %v", err)
 	}
-	cfg := config.LoadConfig(engineName)
-	if cfg.IBflags&uint(flags) != 0 {
-		cfg.IBflags &^= uint(flags)
-	} else {
-		cfg.IBflags |= uint(flags)
-	}
-	config.SaveConfig(cfg, engineName)
 }
 
-//export saveConfigText
-func saveConfigText(text *C.char) {
-	cfgText := C.GoString(text)
-	cfgFn := config.GetConfigPath(engineName)
-	err := ioutil.WriteFile(cfgFn, []byte(cfgText), 0644)
-	if err != nil {
-		panic(err)
+func writeText(path, text string) {
+	if err := config.WriteFileAtomic(path, []byte(text), 0644); err != nil {
+		log.Printf("settings: cannot write %s: %v", path, err)
 	}
+}
+
+//export normalizeShortcutMods
+func normalizeShortcutMods(state C.guint) C.guint {
+	return C.guint(config.NormalizeMods(uint32(state)))
+}
+
+//export shortcutUsable
+func shortcutUsable(mask, keyval C.guint) C.int {
+	if config.ShortcutUsable(uint32(mask), uint32(keyval)) {
+		return 1
+	}
+	return 0
 }
 
 //export saveMacroText
 func saveMacroText(text *C.char) {
-	macroText := C.GoString(text)
-	macroFP := config.GetMacroPath(engineName)
-	err := ioutil.WriteFile(macroFP, []byte(macroText), 0644)
-	if err != nil {
-		panic(err)
-	}
+	writeText(config.GetMacroPath(engineName), C.GoString(text))
 }
 
 //export saveInputMode
 func saveInputMode(mode int) {
-	cfg := config.LoadConfig(engineName)
-	cfg.DefaultInputMode = mode
-	config.SaveConfig(cfg, engineName)
+	update(func(c *config.Config) { c.DefaultInputMode = mode })
 }
 
 //export saveShortcuts
 func saveShortcuts(ptr *C.guint32, length int) {
-	cfg := config.LoadConfig(engineName)
 	codes := makeSliceFromPtr(ptr, length)
-	cfg.Shortcuts = codes
-	config.SaveConfig(cfg, engineName)
+	update(func(c *config.Config) { c.Shortcuts = codes })
 }
 
 //export saveAppMode
 func saveAppMode(appName *C.char, mode int) {
-	cfg := config.LoadConfig(engineName)
-	cfg.InputModeMapping[C.GoString(appName)] = mode
-	config.SaveConfig(cfg, engineName)
+	app := C.GoString(appName)
+	update(func(c *config.Config) { c.InputModeMapping[app] = mode })
 }
 
 //export removeAppMode
 func removeAppMode(appName *C.char) {
-	cfg := config.LoadConfig(engineName)
-	delete(cfg.InputModeMapping, C.GoString(appName))
-	config.SaveConfig(cfg, engineName)
+	app := C.GoString(appName)
+	update(func(c *config.Config) { delete(c.InputModeMapping, app) })
 }
 
 //export saveInputMethodName
 func saveInputMethodName(name *C.char) {
-	cfg := config.LoadConfig(engineName)
-	cfg.InputMethod = C.GoString(name)
-	config.SaveConfig(cfg, engineName)
+	im := C.GoString(name)
+	update(func(c *config.Config) { c.InputMethod = im })
 }
 
 //export saveOutputCharset
 func saveOutputCharset(cs *C.char) {
-	cfg := config.LoadConfig(engineName)
-	cfg.OutputCharset = C.GoString(cs)
-	config.SaveConfig(cfg, engineName)
+	charset := C.GoString(cs)
+	update(func(c *config.Config) { c.OutputCharset = charset })
 }
 
 //export saveIBFlag
 func saveIBFlag(flag C.guint, enabled C.int) {
-	cfg := config.LoadConfig(engineName)
-	if enabled != 0 {
-		cfg.IBflags |= uint(flag)
-	} else {
-		cfg.IBflags &= ^uint(flag)
-	}
-	config.SaveConfig(cfg, engineName)
+	update(func(c *config.Config) {
+		if enabled != 0 {
+			c.IBflags |= uint(flag)
+		} else {
+			c.IBflags &^= uint(flag)
+		}
+	})
 }
 
 //export saveCoreFlag
 func saveCoreFlag(flag C.guint, enabled C.int) {
-	cfg := config.LoadConfig(engineName)
-	if enabled != 0 {
-		cfg.Flags |= uint(flag)
-	} else {
-		cfg.Flags &= ^uint(flag)
-	}
-	config.SaveConfig(cfg, engineName)
+	update(func(c *config.Config) {
+		if enabled != 0 {
+			c.Flags |= uint(flag)
+		} else {
+			c.Flags &^= uint(flag)
+		}
+	})
 }
 
 func makeSliceFromPtr(ptr *C.guint32, size int) [10]uint32 {
@@ -143,9 +132,9 @@ func OpenGUI(engName string, version string, buildId string) {
 	s := (*C.guint32)(&shortcuts[0])
 
 	macroFP := config.GetMacroPath(engineName)
-	mText, err := ioutil.ReadFile(macroFP)
-	if err != nil {
-		panic(err)
+	mText, err := os.ReadFile(macroFP)
+	if err != nil && !os.IsNotExist(err) {
+		log.Printf("settings: cannot read %s: %v", macroFP, err)
 	}
 
 	var appMappings string
@@ -162,7 +151,7 @@ func OpenGUI(engName string, version string, buildId string) {
 	extra := fmt.Sprintf("%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|",
 		cfg.InputMethod, cfg.OutputCharset, cfg.Flags,
 		(ib>>1)&1,  // macro_enabled (bit 1)
-		(ib>>18)&1, // auto_capitalize (existing convention: bit 18)
+		(ib>>15)&1, // auto_capitalize (IBautoCapitalizeMacro, bit 15)
 		(ib>>4)&1,  // spell_check (bit 4)
 		(ib>>8)&1,  // spell_rules (bit 8)
 		(ib>>9)&1,  // spell_dicts (bit 9)

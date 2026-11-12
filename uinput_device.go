@@ -170,10 +170,15 @@ static void uio_scan_keyboards(void) {
 
 // Queries physical keyboard devices to check if KEY_BACKSPACE is physically held down.
 // Uses cached keyboard fds to achieve sub-microsecond response time.
-static int uio_is_physical_backspace_down(void) {
+// Returns 1 held, 0 released, -1 unknown (no readable keyboard). Rescans only
+// when allow_scan is set. Callers serialise (Go physMu).
+static int uio_backspace_state(int allow_scan) {
 	if (g_kbd_count <= 0) {
+		if (!allow_scan) return -1;
 		uio_scan_keyboards();
+		if (g_kbd_count <= 0) return -1;
 	}
+	int seen = 0;
 	for (int i = 0; i < g_kbd_count; i++) {
 		unsigned long key_state[KEY_CNT / (sizeof(unsigned long) * 8) + 1] = {0};
 		if (ioctl(g_kbd_fds[i], EVIOCGKEY(sizeof(key_state)), key_state) >= 0) {
@@ -182,12 +187,13 @@ static int uio_is_physical_backspace_down(void) {
 			if (key_state[word] & (1UL << bit)) {
 				return 1;
 			}
+			seen = 1;
 		} else {
 			// Device disconnected or invalidated -> trigger rescan on next query
 			g_kbd_count = -1;
 		}
 	}
-	return 0;
+	return seen ? 0 : -1;
 }
 */
 import "C"
@@ -197,6 +203,7 @@ import (
 	"log"
 	"sync"
 	"syscall"
+	"time"
 )
 
 var (
@@ -218,6 +225,7 @@ func uinputDeviceOpen() (C.int, error) {
 	needKeys := []C.int{
 		C.KEY_BACKSPACE, C.KEY_LEFTCTRL, C.KEY_LEFTSHIFT, C.KEY_U,
 		C.KEY_ENTER, C.KEY_SPACE, C.KEY_ESC, C.KEY_LEFT, C.KEY_RIGHT,
+		C.KEY_UNKNOWN, // click-to-unstick tap (no keysym)
 	}
 	for _, k := range needKeys {
 		if C.uio_set_keybit(fd, k) < 0 {
@@ -256,6 +264,7 @@ func uinputDirectBackspace(n int) bool {
 	if uinputFd < 0 {
 		return false
 	}
+	unstickNoteRisk()
 	defer func() {
 		// Fail-safe: guarantee KEY_BACKSPACE release event is always posted
 		C.uio_key(uinputFd, C.KEY_BACKSPACE, 0)
@@ -276,11 +285,24 @@ func uinputDirectSelectLeft(n int) bool {
 		return false
 	}
 	debugf("[uinput] DIRECT_SELECT_LEFT n=%d", n)
+	unstickNoteRisk()
 	defer func() {
 		C.uio_key(uinputFd, C.KEY_LEFT, 0)
 		C.uio_key(uinputFd, C.KEY_LEFTSHIFT, 0)
 	}()
 	C.uio_select_left_batch(uinputFd, C.int(n))
+	return true
+}
+
+// uinputDirectNudge taps KEY_UNKNOWN (no keysym): any key event ends an
+// application's runaway key repeat. See clickunstick.go.
+func uinputDirectNudge() bool {
+	uinputDmu.Lock()
+	defer uinputDmu.Unlock()
+	if uinputFd < 0 {
+		return false
+	}
+	C.uio_tap(uinputFd, C.KEY_UNKNOWN)
 	return true
 }
 
@@ -297,11 +319,60 @@ func uinputReleaseAll() {
 // from ghost/runaway repeat storms caused by compositor latches.
 var isPhysicalBackspaceDownHook func() bool
 
-func isPhysicalBackspaceDown() bool {
+// The C keyboard cache is shared by the key handlers and the click watcher
+// goroutines: physMu serialises every access (a concurrent rescan could
+// close a descriptor another goroutine just opened).
+var (
+	physMu         sync.Mutex
+	physLastScan   time.Time
+	physWarnedOnce sync.Once
+)
+
+const kPhysRescanGap = 2 * time.Second // between rescans while no keyboard is readable
+
+// physBackspaceState: 1 held, 0 released, -1 unknown (keyboards unreadable,
+// e.g. not yet in the input group until the next login).
+func physBackspaceState() int {
 	if isPhysicalBackspaceDownHook != nil {
-		return isPhysicalBackspaceDownHook()
+		if isPhysicalBackspaceDownHook() {
+			return 1
+		}
+		return 0
 	}
-	return C.uio_is_physical_backspace_down() != 0
+	physMu.Lock()
+	defer physMu.Unlock()
+	allow := time.Since(physLastScan) >= kPhysRescanGap
+	if allow {
+		physLastScan = time.Now()
+	}
+	st := int(C.uio_backspace_state(C.int(boolInt(allow))))
+	if st < 0 {
+		physWarnedOnce.Do(func() {
+			log.Printf("[uinput] cannot read keyboards (/dev/input/event*): Backspace guards disabled; log out and in after install")
+		})
+	}
+	return st
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func isPhysicalBackspaceDown() bool { return physBackspaceState() == 1 }
+
+// physBackspaceMaybeDown is true unless the key is known to be up: guards
+// that swallow a Backspace must never do so when they cannot tell.
+func physBackspaceMaybeDown() bool { return physBackspaceState() != 0 }
+
+// physRescanKeyboards refreshes the keyboard cache (hotplug).
+func physRescanKeyboards() {
+	physMu.Lock()
+	defer physMu.Unlock()
+	C.uio_scan_keyboards()
+	physLastScan = time.Now()
 }
 
 // uinputTryOpenDirect opens the in-process virtual keyboard.
@@ -319,14 +390,14 @@ func uinputTryOpenDirect() bool {
 }
 
 // uinputInitDirect opens the device; when that fails (at boot /dev/uinput
-// may get its ACL only after the session starts) it uses the socket server
-// meanwhile and keeps retrying in the background.
+// may get its ACL only after the session starts) it keeps retrying in the
+// background.
 func uinputInitDirect() {
 	uinputOnce.Do(func() {
+		unstickStart()
 		if uinputTryOpenDirect() {
 			return
 		}
-		uinputInit() // socket fallback while retrying
 		go uinputOpenLoop(uinputTryOpenDirect, uinputNotifyUnavailable, uinputKick,
 			kUinputRetryBase, kUinputRetryMax, nil)
 	})

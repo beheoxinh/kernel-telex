@@ -21,6 +21,9 @@ package main
 
 import (
 	"strconv"
+	"unicode/utf8"
+
+	"ktelex/config"
 
 	"github.com/BambooEngine/bamboo-core"
 	ibus "github.com/BambooEngine/goibus"
@@ -47,6 +50,11 @@ func (e *Engine) emojiProcessKeyEvent(keyVal uint32, keyCode uint32, state uint3
 	var rawTextLen = len([]rune(raw))
 	var keyRune = rune(keyVal)
 	var reset = e.closeEmojiCandidates
+	// Modifiers (Shift to type ':' or '+', AltGr) and the lock/group keys
+	// (Caps Lock switching the layout) do not touch the query.
+	if isModifierKeysym(keyVal) || config.IsLockOrGroupKey(keyVal) {
+		return false
+	}
 	if keyVal == IBusColon {
 		reset()
 		return false
@@ -97,17 +105,13 @@ func (e *Engine) emojiProcessKeyEvent(keyVal uint32, keyCode uint32, state uint3
 			e.emoji.Reset()
 		}
 		e.emoji.ProcessKey(keyRune)
-	} else if keyRune >= '1' && keyRune <= '9' {
-		if pos, err := strconv.Atoi(string(keyRune)); err == nil {
-			if e.updateCursorPosInEmojiTable(uint32(pos - 1)) {
-				e.commitEmojiCandidate()
-				reset()
-				return true
-			} else {
-				reset()
-			}
-		}
-		return false
+	} else if pos, err := strconv.Atoi(string(keyRune)); err == nil && keyRune >= '1' && keyRune <= '9' &&
+		e.updateCursorPosInEmojiTable(uint32(pos-1)) {
+		// A digit picks a candidate on the page; with no candidate there
+		// it is part of the query (":100").
+		e.commitEmojiCandidate()
+		reset()
+		return true
 	} else if (keyRune >= ' ' && keyRune <= '~') || bamboo.IsWordBreakSymbol(keyRune) {
 		var testStr = string(append(e.emoji.keys, keyRune))
 		if raw == ":" && !e.emoji.MatchString(testStr) {
@@ -129,7 +133,7 @@ func (e *Engine) emojiProcessKeyEvent(keyVal uint32, keyCode uint32, state uint3
 	cps := e.emoji.Query()
 	if cps != nil {
 		codePoint0 := cps[0]
-		e.UpdatePreeditTextWithMode(ibus.NewText(codePoint0), uint32(len(codePoint0)), true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
+		e.UpdatePreeditTextWithMode(ibus.NewText(codePoint0), uint32(utf8.RuneCountInString(codePoint0)), true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
 	} else {
 		e.UpdatePreeditTextWithMode(ibus.NewText(raw), uint32(rawTextLen), true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
 	}
@@ -146,13 +150,16 @@ func (e *Engine) emojiProcessKeyEvent(keyVal uint32, keyCode uint32, state uint3
 }
 
 func (e *Engine) updateCursorPosInEmojiTable(idx uint32) bool {
+	if e.emojiLookupTable == nil {
+		return false
+	}
 	pageSize := e.emojiLookupTable.PageSize
-	if idx > pageSize {
+	if pageSize == 0 || idx >= pageSize {
 		return false
 	}
 	page := e.emojiLookupTable.CursorPos / pageSize
 	newPos := page*pageSize + idx
-	if int(newPos) > len(e.emojiLookupTable.Candidates) {
+	if int(newPos) >= len(e.emojiLookupTable.Candidates) {
 		return false
 	}
 	e.emojiLookupTable.CursorPos = newPos
@@ -168,7 +175,7 @@ func (e *Engine) updateEmojiLookupTable() {
 	var cps = e.emoji.Query()
 	if pos := e.emojiLookupTable.CursorPos; pos < uint32(len(cps)) {
 		var codePoint0 = cps[pos]
-		e.UpdatePreeditTextWithMode(ibus.NewText(codePoint0), uint32(len(codePoint0)), true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
+		e.UpdatePreeditTextWithMode(ibus.NewText(codePoint0), uint32(utf8.RuneCountInString(codePoint0)), true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
 	}
 }
 

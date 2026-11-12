@@ -35,10 +35,11 @@ type keyOrderer struct {
 	served  uint64 // every ticket <= served is finished or abandoned
 	done    map[uint64]bool
 	pending map[keyTriple][]uint64
+	reply   map[uint64]uint64 // ticket -> reply sequence (replyorder.go)
 }
 
 func newKeyOrderer() *keyOrderer {
-	k := &keyOrderer{done: map[uint64]bool{}, pending: map[keyTriple][]uint64{}}
+	k := &keyOrderer{done: map[uint64]bool{}, pending: map[keyTriple][]uint64{}, reply: map[uint64]uint64{}}
 	k.cond = sync.NewCond(&k.mu)
 	return k
 }
@@ -46,11 +47,27 @@ func newKeyOrderer() *keyOrderer {
 var keyOrder = newKeyOrderer()
 
 // issue registers a key press in arrival order (interceptor goroutine).
-func (k *keyOrderer) issue(key keyTriple) {
+// replySeq (0 = none) is the press's place in the reply order.
+func (k *keyOrderer) issue(key keyTriple, replySeq uint64) {
 	k.mu.Lock()
 	k.issued++
 	k.pending[key] = append(k.pending[key], k.issued)
+	if replySeq != 0 {
+		k.reply[k.issued] = replySeq
+	}
 	k.mu.Unlock()
+}
+
+// replySeq returns (and forgets) the reply sequence of ticket t.
+func (k *keyOrderer) replySeq(t uint64) uint64 {
+	if t == 0 {
+		return 0
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	s := k.reply[t]
+	delete(k.reply, t)
+	return s
 }
 
 // acquire blocks until every key press that arrived before this one has been
@@ -119,19 +136,26 @@ func (k *keyOrderer) advanceLocked() {
 		delete(k.done, k.served+1)
 		k.served++
 	}
+	if len(k.reply) > 256 { // tickets abandoned before their call arrived
+		for t := range k.reply {
+			if t <= k.served {
+				delete(k.reply, t)
+			}
+		}
+	}
 }
 
 // keyOrderInterceptor is installed as the IBus connection's incoming
-// interceptor; it only tickets key presses (releases return immediately).
+// interceptor. Every key event is numbered for reply ordering (see
+// replyorder.go); only presses get a processing ticket (releases return
+// immediately, but their reply still waits for the press reply).
 func keyOrderInterceptor(msg *dbus.Message) {
-	if msg.Type != dbus.TypeMethodCall || len(msg.Body) != 3 {
+	if !isKeyEventCall(msg) {
 		return
 	}
-	if m, _ := msg.Headers[dbus.FieldMember].Value().(string); m != "ProcessKeyEvent" {
-		return
-	}
-	if i, _ := msg.Headers[dbus.FieldInterface].Value().(string); i != "org.freedesktop.IBus.Engine" {
-		return
+	var seq uint64
+	if msg.Flags&dbus.FlagNoReplyExpected == 0 {
+		seq = replyOrder.track(replyKey{headerString(msg, dbus.FieldSender), msg.Serial()})
 	}
 	kv, ok1 := msg.Body[0].(uint32)
 	kc, ok2 := msg.Body[1].(uint32)
@@ -139,5 +163,5 @@ func keyOrderInterceptor(msg *dbus.Message) {
 	if !ok1 || !ok2 || !ok3 || st&IBusReleaseMask != 0 {
 		return
 	}
-	keyOrder.issue(keyTriple{kv, kc, st})
+	keyOrder.issue(keyTriple{kv, kc, st}, seq)
 }

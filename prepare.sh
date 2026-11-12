@@ -117,6 +117,34 @@ case "$OS_ID" in
         ;;
 esac
 
+# 2b. Go >= 1.23 (go.mod). Ubuntu 24.04 / Debian 12 ship an older golang-go:
+#     fall back to the versioned golang-1.2x package, or tell the user.
+go_ok() {
+    local g="$1" minor
+    minor="$("$g" env GOVERSION 2>/dev/null | sed -E 's/^go1\.([0-9]+).*/\1/')"
+    [ -n "$minor" ] && [ "$minor" -ge 23 ] 2>/dev/null
+}
+if ! command -v go >/dev/null 2>&1 || ! go_ok go; then
+    found=""
+    for d in /usr/lib/go-1.2[3-9] /usr/lib/go-1.[3-9][0-9]; do
+        [ -x "$d/bin/go" ] && go_ok "$d/bin/go" && found="$d/bin"
+    done
+    if [ -z "$found" ] && command -v apt-get >/dev/null 2>&1; then
+        for v in 1.24 1.23; do
+            if apt-cache show "golang-$v-go" >/dev/null 2>&1; then
+                info "golang-go quá cũ: cài golang-$v-go..."
+                run_sudo apt-get install -y "golang-$v-go" && found="/usr/lib/go-$v/bin" && break
+            fi
+        done
+    fi
+    if [ -n "$found" ]; then
+        export PATH="$found:$PATH"
+        success "Dùng Go tại $found (install.sh tự tìm thấy đường dẫn này)."
+    else
+        warn "Cần Go >= 1.23. Cài từ https://go.dev/dl/ hoặc 'sudo snap install go --classic', rồi chạy lại."
+    fi
+fi
+
 # 3. Cấu hình quyền truy cập /dev/uinput (Cực kỳ quan trọng cho Kernel Mode)
 info "Kiểm tra quyền truy cập /dev/uinput (Kernel Mode)..."
 

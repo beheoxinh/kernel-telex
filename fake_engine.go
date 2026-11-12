@@ -54,6 +54,7 @@ type fakeEngine struct {
 	// its own goroutine, so -race sees concurrent access without this.
 	mu                  sync.Mutex
 	commitText          string
+	registerProps       int // RegisterProperties signals sent
 	preeditText         string
 	committed           bool
 	isHidePreeditText   bool
@@ -61,6 +62,7 @@ type fakeEngine struct {
 	isHideLookupTable   bool
 	isReset             bool
 	forwardKeyEvent     [3]uint32
+	onForward           func(keyval, keycode, state uint32) // test hook, called without mu
 }
 
 func NewFakeEngine() *fakeEngine {
@@ -166,8 +168,12 @@ func (e *fakeEngine) CommitText(text *ibus.Text) {
 // @signal(signature="uuu")
 func (e *fakeEngine) ForwardKeyEvent(keyval uint32, keycode uint32, state uint32) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.forwardKeyEvent = [3]uint32{keyval, keycode, state}
+	hook := e.onForward
+	e.mu.Unlock()
+	if hook != nil {
+		hook(keyval, keycode, state)
+	}
 }
 
 // @signal(signature="vubu")
@@ -234,6 +240,9 @@ func (e *fakeEngine) CursorDownLookupTable() {
 
 // @signal(signature="v")
 func (e *fakeEngine) RegisterProperties(props *ibus.PropList) {
+	e.mu.Lock()
+	e.registerProps++
+	e.mu.Unlock()
 }
 
 // @signal(signature="v")

@@ -5,7 +5,8 @@
 #   ./prepare.sh   # first time only: build dependencies
 #   ./install.sh   # build into dist/, install (sudo), set up /dev/uinput, restart IBus
 # Run as your normal user: the build stays user-owned, only the copy uses sudo.
-# Env: KTELEX_NO_INPUT_SOURCE=1 skips adding KTelex to GNOME input sources.
+# Env: KTELEX_NO_INPUT_SOURCE=1 skips adding KTelex to GNOME input sources;
+#      KTELEX_NO_EXTENSION=1 skips the GNOME focus-tracking extension.
 # ==============================================================================
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
@@ -38,6 +39,16 @@ CURRENT_USER="${SUDO_USER:-$USER}"
 
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
     warn "Đang chạy bằng sudo: nên chạy './install.sh' bằng user thường (script tự gọi sudo khi cần)."
+fi
+
+# Distro golang-go may be older than go.mod needs: prefer a newer versioned
+# toolchain (/usr/lib/go-1.2x, installed by prepare.sh on Debian/Ubuntu).
+go_minor_of() { "$1" env GOVERSION 2>/dev/null | sed -E 's/^go1\.([0-9]+).*/\1/'; }
+if ! command -v go >/dev/null 2>&1 || [ "$(go_minor_of go)" -lt 23 ] 2>/dev/null; then
+    for d in /usr/lib/go-1.2[3-9] /usr/lib/go-1.[3-9][0-9] /usr/local/go /snap/go/current; do
+        m="$(go_minor_of "$d/bin/go" 2>/dev/null || true)"
+        if [ -n "$m" ] && [ "$m" -ge 23 ] 2>/dev/null; then export PATH="$d/bin:$PATH"; break; fi
+    done
 fi
 
 # 1. Kiểm tra công cụ và thư viện build
@@ -135,13 +146,36 @@ if [ "${KTELEX_NO_INPUT_SOURCE:-0}" != 1 ] && [ "$(id -u)" -ne 0 ] \
     fi
 fi
 
+# 7. GNOME Wayland: extension cho biết cửa sổ đang focus (để nhận diện app/game)
+EXT_UUID="wmclass-helper@local"
+if [ "${KTELEX_NO_EXTENSION:-0}" != 1 ] && [ "$(id -u)" -ne 0 ] && command -v gnome-extensions >/dev/null 2>&1 \
+    && [ -d "gnome-extension/${EXT_UUID}" ]; then
+    ext_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/${EXT_UUID}"
+    mkdir -p "$ext_dir"
+    if ! cmp -s "gnome-extension/${EXT_UUID}/extension.js" "$ext_dir/extension.js" 2>/dev/null \
+        || ! cmp -s "gnome-extension/${EXT_UUID}/metadata.json" "$ext_dir/metadata.json" 2>/dev/null; then
+        install -m 0644 "gnome-extension/${EXT_UUID}/extension.js" "gnome-extension/${EXT_UUID}/metadata.json" "$ext_dir/"
+        ext_new=1
+    fi
+    if gnome-extensions enable "$EXT_UUID" 2>/dev/null; then
+        success "Đã bật GNOME extension ${EXT_UUID}."
+    else
+        ext_new=1
+    fi
+    if [ "${ext_new:-0}" = 1 ] && [ "${XDG_SESSION_TYPE:-}" = wayland ]; then
+        warn "GNOME Wayland chỉ nạp extension mới sau khi đăng xuất/đăng nhập lại; sau đó chạy: gnome-extensions enable ${EXT_UUID}"
+    fi
+fi
+
 echo ""
 success "=================================================================="
 success "       CÀI ĐẶT THÀNH CÔNG KERNEL TELEX (KTELEX)!"
 success "=================================================================="
-echo -e "  • Chuyển bộ gõ: ${BLUE}Super+Space${NC}; đổi chế độ gõ cho app: ${BLUE}Alt+Z${NC}."
+echo -e "  • Chuyển Anh/Việt: phím chuyển nguồn nhập của GNOME (${BLUE}Super+Space${NC}, hoặc ${BLUE}Caps Lock${NC} nếu bật grp:caps_toggle)."
+echo -e "  • Đổi chế độ gõ cho từng app: ${BLUE}Alt+Z${NC} (sửa trong phần Cài đặt)."
 echo -e "  • Cài đặt: tìm 'KTelex' trong menu ứng dụng, hoặc ${BLUE}/usr/libexec/ibus-engine-ktelex --gui${NC}."
-echo -e "  • Log: ${BLUE}/tmp/ktelex.log${NC}"
+echo -e "  • Log: ${BLUE}\${XDG_STATE_HOME:-~/.local/state}/ktelex/ktelex.log${NC} (log chi tiết: KTELEX_DEBUG=1 hoặc tạo file ~/.config/ibus-ktelex/debug)"
+echo -e "  • Gỡ cài đặt: ${BLUE}./uninstall.sh${NC}"
 if [ "$relogin" = 1 ]; then
     warn "Đăng xuất và đăng nhập lại một lần để quyền nhóm 'input' có hiệu lực lâu dài."
 fi

@@ -195,10 +195,9 @@ type Engine struct {
 | **IBus bridge** | vendor/goibus | IBus D-Bus binding |
 | **Wayland focus** | `wl_introspector.go`, `client.go` | wlr-foreign-toplevel |
 | **X11 focus** | `x11.go`, `x11_introspector.c` | Xlib _NET_ACTIVE_WINDOW |
-| **GNOME focus** | `gnome_introspector.go` | GNOME Shell D-Bus Eval |
+| **GNOME focus** | `gnome_introspector.go`, `gnome-extension/wmclass-helper@local` | Extension D-Bus `org.gnome.Shell.WMClassHelper` (Eval chỉ khi unsafe-mode) |
 | **Uinput device** | `uinput_device.go` | /dev/uinput CGo |
-| **Uinput client** | `uinput_client.go` | Unix socket ↔ uinput-server |
-| **Uinput server** | `cmd/uinput-server/main.go` | Standalone /dev/uinput |
+| **Uinput client** | `uinput_client.go`, `uinputretry.go` | Backspace qua device in-process; tự mở lại /dev/uinput khi chưa có quyền |
 | **Game detection** | `isGame.go` | /proc/PID/comm + environ |
 | **GTK3 GUI** | `ui/ui.go`, `ui/keyboard-shortcut-editor.c` | Cấu hình + shortcut editor |
 | **Config** | `config/config.go` | JSON load/save + migration |
@@ -588,19 +587,9 @@ ibus-engine-ktelex
        └─ C.uio_key(fd, KEY_BACKSPACE, 0)   // release
        └─ C.usleep(1000)                     // 1ms
 
-Đường B: Unix socket → standalone server
-──────────
-ibus-engine-ktelex
-  └─ uinputBackspace(n)
-       └─ net.Dial("unix", "@ktelex-uinput")
-       └─ binary.Write(sock, count, textLen, text)
-            → uinput-server
-               └─ handlePacket()
-                    ├─ Backspace() × count
-                    ├─ typeUtf8(text)
-                    │   └─ typeCodepoint(r) × len
-                    │       └─ Ctrl+Shift+U + hex + Enter
-                    └─ hoặc exec.Command("ydotool", "type", text)
+Khi /dev/uinput chưa mở được (ví dụ ACL chưa gắn lúc đăng nhập):
+uinputBackspace trả về false, đánh thức vòng thử lại (uinputretry.go,
+backoff 1s → 60s) và báo người dùng sau ~7s. Không còn socket server riêng.
 ```
 
 ### 7.3. Luồng biến đổi (Transformation)
@@ -950,7 +939,7 @@ Check environment variables: SteamAppId, WINEPREFIX, STEAM_COMPAT_DATA_PATH.
 | `/usr/share/ktelex/data/vietnamese.cm.dict` | Từ điển VN |
 | `/usr/share/ktelex/data/ktelex.xml` | IBus component registration |
 | `/usr/share/ktelex/icons/vi.svg` (us.svg) | Flag icons |
-| `/tmp/ktelex.log` | Debug log (khi --ibus) |
+| `$XDG_STATE_HOME/ktelex/ktelex.log` (mặc định `~/.local/state/...`) | Log engine (khi --ibus), xoay vòng 8 MB; log từng phím chỉ khi `KTELEX_DEBUG=1` hoặc có file `~/.config/ibus-ktelex/debug` |
 
 ### 13.2. Startup sequence
 

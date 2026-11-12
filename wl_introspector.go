@@ -2,45 +2,57 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"sync/atomic"
 
 	wl "github.com/dkolbly/wl"
 )
 
-var wlAppId string
+// wlFocusedAppId holds the app-id of the activated toplevel, as reported by
+// wlroots compositors (sway, Hyprland, …) through the foreign-toplevel
+// protocol. GNOME does not offer that protocol: its focus comes from the
+// shell (gnome_introspector.go).
+var wlFocusedAppId atomic.Value // string
 
-// wlGetFocusWindowClass connects to the Wayland compositor, reads the
-// focused window's app-id through the foreign-toplevel protocol, and returns.
-//
-// The display connection is opened fresh on every call and closed inside the
-// event loop (display.Context().Close()) as soon as the first app-id arrives:
-// holding the connection open would leak one Wayland socket per FocusIn, and
-// the dispatch channel would block forever once the compositor has nothing
-// more to deliver. Closing from inside the loop is safe because Close only
-// tears down the local socket — the appIdChan already carries the result out.
-func wlGetFocusWindowClass() error {
+func wlAppId() string {
+	s, _ := wlFocusedAppId.Load().(string)
+	return s
+}
+
+// wlTrackFocus keeps one connection to the compositor and follows the
+// activated toplevel for the life of the engine. It returns when the
+// compositor does not offer the protocol.
+func wlTrackFocus() {
 	display, err := wl.Connect("")
 	if err != nil {
-		return fmt.Errorf("Connect to Wayland server failed %s", err)
+		log.Printf("wayland focus: %v", err)
+		return
 	}
-	appIdChan := make(chan string, 10)
-	err = registerGlobals(display, appIdChan)
-	if err != nil {
-		return err
+	appIdChan := make(chan string, 1)
+	if err := registerGlobals(display, appIdChan); err != nil {
+		log.Printf("wayland focus: %v", err)
+		display.Context().Close()
+		return
 	}
-	for {
-		select {
-		case wlAppId = <-appIdChan:
-			fmt.Println("wlAppId = ", wlAppId)
-			// Context close inside the event loop: the dispatch arm below
-			// borrows display.Context(), so the connection must be torn
-			// down here — after Close, Dispatch would fail and the loop
-			// exits via return instead of spinning on a dead socket.
-			display.Context().Close()
-			return nil
-		case display.Context().Dispatch() <- struct{}{}:
+	if !wlManagerBound.Load() {
+		log.Printf("wayland focus: compositor has no zwlr_foreign_toplevel_manager_v1")
+		display.Context().Close()
+		return
+	}
+	go func() {
+		for id := range appIdChan {
+			wlFocusedAppId.Store(id)
 		}
+	}()
+	// Each token lets the context read and dispatch one event. When the
+	// compositor goes away the context stops reading and this blocks: one
+	// idle goroutine, the last app-id stays.
+	for {
+		display.Context().Dispatch() <- struct{}{}
 	}
 }
+
+var wlManagerBound atomic.Bool
 
 func registerGlobals(display *wl.Display, appIdChan chan string) error {
 	registry, err := display.GetRegistry()
@@ -61,7 +73,7 @@ func registerGlobals(display *wl.Display, appIdChan chan string) error {
 	cdeHandler := doner{cdeChan}
 
 	callback.AddDoneHandler(cdeHandler)
-	adHandler := appIdHandler{appIdChan, false}
+	adHandler := appIdHandler{appIdChan}
 loop:
 	for {
 		select {
@@ -89,6 +101,7 @@ func registerInterface(registry *wl.Registry, ev wl.RegistryGlobalEvent, ctx *wl
 		if err != nil {
 			return fmt.Errorf("Unable to bind ZwlrForeignToplevelManagerV1 interface: %s", err)
 		}
+		wlManagerBound.Store(true)
 	}
 	return nil
 }
@@ -114,23 +127,54 @@ type toplevelHandlers struct {
 }
 
 func (t toplevelHandlers) HandleZwlrForeignToplevelManagerV1Toplevel(ev ZwlrForeignToplevelManagerV1ToplevelEvent) {
-	ev.Toplevel.AddAppIdHandler(t.adHandler)
-	ev.Toplevel.AddDoneHandler(t.adHandler)
+	h := &toplevelState{ch: t.adHandler.ch}
+	ev.Toplevel.AddAppIdHandler(h)
+	ev.Toplevel.AddStateHandler(h)
+	ev.Toplevel.AddDoneHandler(h)
 }
 
+// appIdHandler carries the channel the focused app-id is sent on.
 type appIdHandler struct {
-	ch             chan string
-	isAppIdUpdated bool
+	ch chan string
 }
 
-func (a *appIdHandler) HandleZwlrForeignToplevelHandleV1AppId(ev ZwlrForeignToplevelHandleV1AppIdEvent) {
-	a.ch <- ev.AppId
-	a.isAppIdUpdated = true
+// toplevelState collects one toplevel's app-id and state; "done" applies
+// them atomically. The activated toplevel is the focused window.
+type toplevelState struct {
+	ch        chan string
+	appId     string
+	activated bool
 }
 
-func (a *appIdHandler) HandleZwlrForeignToplevelHandleV1Done(ev ZwlrForeignToplevelHandleV1DoneEvent) {
-	if !a.isAppIdUpdated {
-		a.ch <- ""
+func (t *toplevelState) HandleZwlrForeignToplevelHandleV1AppId(ev ZwlrForeignToplevelHandleV1AppIdEvent) {
+	t.appId = ev.AppId
+}
+
+func (t *toplevelState) HandleZwlrForeignToplevelHandleV1State(ev ZwlrForeignToplevelHandleV1StateEvent) {
+	t.activated = false
+	for _, st := range ev.State {
+		if st == ZwlrForeignToplevelHandleV1StateActivated {
+			t.activated = true
+		}
 	}
-	a.isAppIdUpdated = false
+}
+
+func (t *toplevelState) HandleZwlrForeignToplevelHandleV1Done(ev ZwlrForeignToplevelHandleV1DoneEvent) {
+	if !t.activated {
+		return
+	}
+	// Latest wins: drop an unread older value instead of blocking the
+	// dispatch goroutine.
+	select {
+	case t.ch <- t.appId:
+	default:
+		select {
+		case <-t.ch:
+		default:
+		}
+		select {
+		case t.ch <- t.appId:
+		default:
+		}
+	}
 }

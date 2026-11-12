@@ -26,15 +26,10 @@ char *input_mode_alert =
 	"Mỗi ứng dụng có thể đặt chế độ gõ riêng.\n"
 	"Nhấn phím tắt Chuyển chế độ gõ để đổi nhanh.";
 
-char *fix_fb_alert =
-	"Bật tùy chọn này nếu bạn gặp tình trạng lặp chữ "
-	"khi chat trong Facebook, Messenger.\n"
-	"Lưu ý: Tính năng này có thể khiến thanh địa chỉ "
-	"trên trình duyệt Google Chrome hoạt động không chính xác.";
-
 char *mode_names[] = {"Kernel", "Preedit", "Surround", "Ignore"};
 
 static void update_shortcut_label(int row);
+static GtkWidget *apps_list = NULL, *ignore_list = NULL;
 static void add_app_list_page(GtkWidget *parent, const char *mappings, int filter_mode, const char *placeholder);
 static GtkWidget* make_app_row(const char *app, int mode);
 
@@ -50,22 +45,6 @@ static void btn_reset_cb(GtkWidget *widget, gpointer data) {
 	for (int i = 0; i < TOTAL_ROWS; i++)
 		update_shortcut_label(i);
 	save_shortcuts();
-}
-
-static void close_window(GtkWidget *widget, gpointer data) {
-	gtk_widget_destroy(GTK_WIDGET(data ? data : widget));
-}
-
-static void btn_macro_save_cb(GtkWidget *widget, gpointer data) {
-	GtkTextBuffer *buffer = g_object_get_data(G_OBJECT(widget), "buffer");
-	int saveMacro = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "saveMacroText"));
-	GtkTextIter start, end;
-	gtk_text_buffer_get_bounds(buffer, &start, &end);
-	gchar *text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-	if (saveMacro) saveMacroText(text);
-	else saveConfigText(text);
-	g_free(text);
-	close_window(widget, data);
 }
 
 static char *format_accel(guint keyval, guint mask) {
@@ -87,7 +66,7 @@ static void update_shortcut_label(int row) {
 	if (mask & GDK_CONTROL_MASK) strcat(buf, "Ctrl+");
 	if (mask & GDK_MOD1_MASK) strcat(buf, "Alt+");
 	if (mask & GDK_SHIFT_MASK) strcat(buf, "Shift+");
-	if (mask & GDK_SUPER_MASK) strcat(buf, "Super+");
+	if (mask & (GDK_SUPER_MASK | GDK_MOD4_MASK)) strcat(buf, "Super+");
 	strcat(buf, accel);
 	g_free(accel);
 	gtk_button_set_label(GTK_BUTTON(shortcut_buttons[row]), buf);
@@ -98,8 +77,7 @@ static gboolean shortcut_key_press(GtkWidget *w, GdkEventKey *event, gpointer da
 	if (row != recording_row) return FALSE;
 	if (event->keyval == GDK_KEY_Escape) {
 		recording_row = -1;
-		gtk_button_set_label(GTK_BUTTON(shortcut_buttons[row]), "Chưa đặt");
-		save_shortcuts();
+		update_shortcut_label(row); // cancel: keep the old shortcut
 		return TRUE;
 	}
 	if (event->keyval == GDK_KEY_BackSpace || event->keyval == GDK_KEY_Delete) {
@@ -111,8 +89,17 @@ static gboolean shortcut_key_press(GtkWidget *w, GdkEventKey *event, gpointer da
 		return TRUE;
 	}
 	if (event->is_modifier) return TRUE;
-	guint mask = event->state & gtk_accelerator_get_default_mod_mask();
+	// Shift/Ctrl/Alt/Super only (Super stored as Mod4): Caps Lock, Num Lock
+	// and the layout group are not part of a shortcut.
+	guint mask = normalizeShortcutMods(event->state);
 	guint keyval = gdk_keyval_to_lower(event->keyval);
+	if (!shortcutUsable(mask, keyval)) {
+		// A letter without Ctrl/Alt/Super would eat normal typing; Caps
+		// Lock and Super+Space switch the input source. Keep recording.
+		gtk_button_set_label(GTK_BUTTON(shortcut_buttons[row]),
+			"Không dùng được – cần Ctrl/Alt/Super");
+		return TRUE;
+	}
 	key_pairs_tmp[row * 2] = mask;
 	key_pairs_tmp[row * 2 + 1] = keyval;
 	recording_row = -1;
@@ -193,9 +180,12 @@ static GtkWidget *macro_list = NULL;
 static GtkWidget *macro_entry_key = NULL;
 static GtkWidget *macro_entry_val = NULL;
 static GtkWidget *macro_win = NULL;
+// Comment lines of the macro file, written back first on every save.
+static GString *macro_comments = NULL;
 
 static void macro_save_all(void) {
-	GString *buf = g_string_new("# DO NOT DELETE THIS LINE*** version=1 ***\n#\n");
+	GString *buf = g_string_new(macro_comments && macro_comments->len > 0 ?
+		macro_comments->str : "# DO NOT DELETE THIS LINE*** version=1 ***\n#\n");
 	GtkWidget *row;
 	GList *children = gtk_container_get_children(GTK_CONTAINER(macro_list));
 	for (GList *c = children; c; c = c->next) {
@@ -321,26 +311,25 @@ static void add_typing_page(GtkWidget *parent, GtkWidget *win, const char *macro
 	macro_list = gtk_list_box_new();
 	gtk_list_box_set_selection_mode(GTK_LIST_BOX(macro_list), GTK_SELECTION_NONE);
 
-	// Parse existing macros
+	// Parse existing macros; keep the comment lines for the next save.
+	macro_comments = g_string_new("");
 	if (macro_text && strlen(macro_text) > 0) {
-		char *copy = g_strdup(macro_text);
-		char *save;
-		char *line = strtok_r(copy, "\n", &save);
-		while (line) {
-			if (line[0] == '#' || strlen(line) < 3) { line = strtok_r(NULL, "\n", &save); continue; }
+		gchar **lines = g_strsplit(macro_text, "\n", -1);
+		for (gchar **lp = lines; *lp; lp++) {
+			char *line = *lp;
+			size_t n = strlen(line);
+			if (n > 0 && line[n - 1] == '\r') line[--n] = '\0';
+			if (line[0] == '#' || line[0] == ';') {
+				g_string_append_printf(macro_comments, "%s\n", line);
+				continue;
+			}
 			char *colon = strchr(line, ':');
-			if (!colon) { line = strtok_r(NULL, "\n", &save); continue; }
+			if (!colon || colon == line) continue;
 			*colon = '\0';
-			char *key = line;
-			char *val = colon + 1;
-			if (strlen(key) == 0) { line = strtok_r(NULL, "\n", &save); continue; }
-
-			GtkWidget *lrow2 = macro_create_row(key, val);
+			GtkWidget *lrow2 = macro_create_row(line, colon + 1);
 			gtk_list_box_insert(GTK_LIST_BOX(macro_list), lrow2, -1);
-
-			line = strtok_r(NULL, "\n", &save);
 		}
-		g_free(copy);
+		g_strfreev(lines);
 	}
 
 	gtk_container_add(GTK_CONTAINER(sw), macro_list);
@@ -368,12 +357,26 @@ static void add_typing_page(GtkWidget *parent, GtkWidget *win, const char *macro
 	gtk_box_pack_start(GTK_BOX(parent), vbox, TRUE, TRUE, 0);
 }
 
+// Combo rows are Kernel, Preedit, Surround, Ignore; the config stores the
+// input mode constants 0, 1, 2 and 7 (UsIM). 3..6 are legacy modes that the
+// engine migrates to Preedit.
+#define MODE_IGNORE 7
+static int mode_to_index(int mode) {
+	switch (mode) {
+	case 0: return 0;
+	case 2: return 2;
+	case MODE_IGNORE: return 3;
+	default: return 1;
+	}
+}
+static int index_to_mode(int idx) {
+	return idx == 3 ? MODE_IGNORE : (idx >= 0 && idx <= 2 ? idx : 0);
+}
+
 static void app_mode_changed(GtkComboBox *combo, gpointer data) {
-	GtkTreeIter iter;
-	if (!gtk_combo_box_get_active_iter(combo, &iter)) return;
-	GtkTreeModel *model = gtk_combo_box_get_model(combo);
-	gint mode;
-	gtk_tree_model_get(model, &iter, 1, &mode, -1);
+	int idx = gtk_combo_box_get_active(combo);
+	if (idx < 0) return;
+	int mode = index_to_mode(idx);
 	const char *app = (const char *)g_object_get_data(G_OBJECT(combo), "app_name");
 	saveAppMode((char*)app, mode);
 
@@ -383,10 +386,20 @@ static void app_mode_changed(GtkComboBox *combo, gpointer data) {
 	GtkWidget *lrow = gtk_widget_get_parent(row);
 	if (!lrow) return;
 	GtkWidget *list = gtk_widget_get_parent(lrow);
-	int is_ignore = (mode == 3);
+	int is_ignore = (mode == MODE_IGNORE);
 	int tab_is_ignore = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(list), "is_ignore"));
-	if (is_ignore != tab_is_ignore)
+	if (is_ignore != tab_is_ignore) {
+		// Show it in the other tab right away.
+		GtkWidget *other = is_ignore ? ignore_list : apps_list;
+		if (other) {
+			GtkWidget *nrow = make_app_row(app, mode);
+			GtkWidget *nl = gtk_list_box_row_new();
+			gtk_container_add(GTK_CONTAINER(nl), nrow);
+			gtk_list_box_insert(GTK_LIST_BOX(other), nl, 0);
+			gtk_widget_show_all(nl);
+		}
 		gtk_widget_destroy(lrow);
+	}
 }
 
 static void app_delete_clicked(GtkWidget *btn, gpointer data) {
@@ -410,7 +423,7 @@ static void add_app_clicked(GtkWidget *btn, gpointer data) {
 	GtkWidget *list = GTK_WIDGET(data);
 	GtkWidget *entry = g_object_get_data(G_OBJECT(btn), "entry");
 	int filter_mode = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "filter_mode"));
-	int default_mode = (filter_mode == 3) ? 3 : 0;
+	int default_mode = (filter_mode == MODE_IGNORE) ? MODE_IGNORE : 0;
 	const char *app = gtk_entry_get_text(GTK_ENTRY(entry));
 	if (strlen(app) == 0) return;
 	saveAppMode((char*)app, default_mode);
@@ -435,15 +448,15 @@ static GtkWidget* make_app_row(const char *app, int mode) {
 	GtkWidget *combo = gtk_combo_box_text_new();
 	for (int i = 0; i < 4; i++)
 		gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(combo), NULL, mode_names[i]);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(combo), mode);
-	g_object_set_data(G_OBJECT(combo), "app_name", g_strdup(app));
+	gtk_combo_box_set_active(GTK_COMBO_BOX(combo), mode_to_index(mode));
+	g_object_set_data_full(G_OBJECT(combo), "app_name", g_strdup(app), g_free);
 	g_signal_connect(combo, "changed", G_CALLBACK(app_mode_changed), NULL);
 
 	GtkWidget *del = gtk_button_new_with_label("✕");
 	gtk_widget_set_size_request(del, 24, 24);
 	gtk_style_context_add_class(gtk_widget_get_style_context(del), "destructive-action");
 	gtk_style_context_add_class(gtk_widget_get_style_context(del), "circular");
-	g_object_set_data(G_OBJECT(del), "app_name", g_strdup(app));
+	g_object_set_data_full(G_OBJECT(del), "app_name", g_strdup(app), g_free);
 	g_signal_connect(del, "clicked", G_CALLBACK(app_delete_clicked), NULL);
 
 	gtk_box_pack_start(GTK_BOX(row), lbl, TRUE, TRUE, 0);
@@ -464,8 +477,8 @@ static void populate_app_list(GtkListBox *list, const char *data, int filter_mod
 		char *modestr = strtok_r(NULL, "|", &save2);
 		if (!app || !modestr) { entry = strtok_r(NULL, ";", &save1); continue; }
 		int mode = atoi(modestr);
-		if (filter_mode >= 0 && mode != filter_mode) { entry = strtok_r(NULL, ";", &save1); continue; }
-		if (filter_mode == -1 && mode == 3) { entry = strtok_r(NULL, ";", &save1); continue; }
+		int ignored = (mode == MODE_IGNORE);
+		if (ignored != (filter_mode == MODE_IGNORE)) { entry = strtok_r(NULL, ";", &save1); continue; }
 		GtkWidget *row = make_app_row(app, mode);
 		GtkWidget *lrow = gtk_list_box_row_new();
 		gtk_container_add(GTK_CONTAINER(lrow), row);
@@ -486,7 +499,8 @@ static void add_app_list_page(GtkWidget *parent, const char *mappings, int filte
 	gtk_widget_set_margin_start(list, 12);
 	gtk_widget_set_margin_end(list, 12);
 	gtk_widget_set_margin_top(list, 12);
-	g_object_set_data(G_OBJECT(list), "is_ignore", GINT_TO_POINTER(filter_mode == 3));
+	g_object_set_data(G_OBJECT(list), "is_ignore", GINT_TO_POINTER(filter_mode == MODE_IGNORE));
+	if (filter_mode == MODE_IGNORE) ignore_list = list; else apps_list = list;
 
 	populate_app_list(GTK_LIST_BOX(list), mappings, filter_mode);
 	gtk_container_add(GTK_CONTAINER(sw), list);
@@ -521,14 +535,14 @@ static void combo_changed_cb(GtkComboBox *combo, gpointer data) {
 
 static GtkWidget* make_dropdown(int mode) {
 	GtkListStore *store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 4; i++) {
 		GtkTreeIter iter;
 		gtk_list_store_append(store, &iter);
-		gtk_list_store_set(store, &iter, 0, mode_names[i], 1, i, -1);
+		gtk_list_store_set(store, &iter, 0, mode_names[i], 1, index_to_mode(i), -1);
 	}
 	GtkWidget *combo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(store));
 	g_object_unref(store);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(combo), mode);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(combo), mode_to_index(mode));
 	g_signal_connect(combo, "changed", G_CALLBACK(combo_changed_cb), NULL);
 	GtkCellRenderer *r = gtk_cell_renderer_text_new();
 	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(combo), r, TRUE);
@@ -641,10 +655,10 @@ static void add_other_page(GtkWidget *parent, guint ibflags, int mode, const cha
 	char *current_im = NULL, *current_cs = NULL, *im_list = NULL, *cs_list = NULL;
 	guint core_flags = 0, mcr=0, cap=0, spl=0, rls=0, dct=0, game=0;
 	if (extra && strlen(extra) > 0) {
-		char *copy = g_strdup(extra);
-		char *p[13]; int n=0;
-		char *save, *tok = strtok_r(copy, "|", &save);
-		while (tok && n < 13) { p[n++] = tok; tok = strtok_r(NULL, "|", &save); }
+		// g_strsplit keeps empty fields (strtok would merge them and shift
+		// every field after an empty one).
+		gchar **p = g_strsplit(extra, "|", -1);
+		int n = g_strv_length(p);
 		if (n >= 12) {
 			current_im = g_strdup(p[0]); current_cs = g_strdup(p[1]);
 			core_flags = atoi(p[2]); mcr = atoi(p[3]); cap = atoi(p[4]);
@@ -652,7 +666,7 @@ static void add_other_page(GtkWidget *parent, guint ibflags, int mode, const cha
 			game = atoi(p[9]);
 			im_list = g_strdup(p[10]); cs_list = g_strdup(p[11]);
 		}
-		g_free(copy);
+		g_strfreev(p);
 	}
 	if (!current_im) current_im = g_strdup("");
 	if (!current_cs) current_cs = g_strdup("");
@@ -709,7 +723,7 @@ static void add_other_page(GtkWidget *parent, guint ibflags, int mode, const cha
 
 	struct { char *label; guint bit; } ib_toggles[] = {
 		{"Bật gõ tắt", 1},
-		{"Tự động viết hoa", 18},
+		{"Tự động viết hoa", 15},
 		{"Kiểm tra chính tả", 4},
 		{"Sử dụng luật ghép vần", 8},
 		{"Sử dụng từ điển", 9},
@@ -788,12 +802,12 @@ int openGUI(guint flags, int mode, guint32 *s, int size,
 
 	page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_widget_set_vexpand(page, TRUE);
-	add_app_list_page(page, map, 0, "WM_CLASS (ví dụ: firefox)");
+	add_app_list_page(page, map, -1, "WM_CLASS (ví dụ: firefox)");
 	gtk_stack_add_titled(GTK_STACK(stack), page, "apps", "Apps");
 
 	page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_widget_set_vexpand(page, TRUE);
-	add_app_list_page(page, map, 3, "WM_CLASS (ví dụ: chrome)");
+	add_app_list_page(page, map, MODE_IGNORE, "WM_CLASS (ví dụ: chrome)");
 	gtk_stack_add_titled(GTK_STACK(stack), page, "ignore", "Ignore");
 
 	gtk_container_add(GTK_CONTAINER(win), stack);

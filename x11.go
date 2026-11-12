@@ -30,6 +30,8 @@ extern long x11GetFocusPID();
 */
 import "C"
 
+import "unsafe"
+
 func init() {
 	C.setXIgnoreErrorHandler()
 }
@@ -41,6 +43,7 @@ func x11GetFocusPID() int {
 func x11GetFocusWindowClass() string {
 	var wmClass = C.x11GetFocusWindowClass()
 	if wmClass != nil {
+		defer C.free(unsafe.Pointer(wmClass))
 		return C.GoString(wmClass)
 	}
 	return ""

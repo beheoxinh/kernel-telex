@@ -41,8 +41,11 @@ const (
 
 	IBusReleaseMask = 1 << 30
 
-	IBusModifierMask   = 0x5f001fff
-	IBusDefaultModMask = IBusControlMask | IBusShiftMask | IBusMod1Mask | IBusMod4Mask | IBusSuperMask | IBusHyperMask | IBusMetaMask | 0xffeb
+	IBusModifierMask = 0x5f001fff
+	// IBusDefaultModMask: the modifiers a shortcut is made of. Lock (Caps
+	// Lock), Mod2 (Num Lock), the keyboard group bits and mouse buttons are
+	// not: they must not stop a shortcut from matching.
+	IBusDefaultModMask = IBusControlMask | IBusShiftMask | IBusMod1Mask | IBusMod4Mask | IBusSuperMask | IBusHyperMask | IBusMetaMask
 )
 
 const (
@@ -69,6 +72,8 @@ const (
 	IBusPageUp          = 0xFF55
 	IBusPageDown        = 0xFF56
 	IBusBackSpace       = 0xff08
+	IBusDelete          = 0xffff
+	IBusVoidSymbol      = 0xffffff
 	IBusReturn          = 0xff0d
 	IBusKP_Enter        = 0xff8d
 	IBusEscape          = 0xff1b

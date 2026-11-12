@@ -36,13 +36,31 @@ type appModel struct {
 func newAppModel(t *testing.T) *appModel {
 	t.Helper()
 	e, fe := newUinputEchoEngine(t)
-	return &appModel{t: t, e: e, fe: fe}
+	a := &appModel{t: t, e: e, fe: fe}
+	// Replayed keys reach the app through ForwardKeyEvent.
+	fe.onForward = func(kv, _, st uint32) {
+		if st&IBusReleaseMask != 0 {
+			return
+		}
+		a.foldCommits()
+		if kv == IBusBackSpace {
+			if len(a.buf) > 0 {
+				a.buf = a.buf[:len(a.buf)-1]
+			}
+		} else if r := rune(kv); r >= 0x20 && r < 0x7f {
+			a.buf = append(a.buf, r)
+		}
+	}
+	return a
 }
 
 // typeKey feeds one keystroke; ret=false means the app receives it.
 func (a *appModel) typeKey(keyval uint32) bool {
 	a.t.Helper()
 	ret, _ := a.e.uinputProcessKeyEvent(keyval, keyval, 0)
+	// Text committed while handling the key (signals) reaches the app
+	// before the key itself (the reply).
+	a.foldCommits()
 	if !ret {
 		if keyval == IBusBackSpace {
 			if len(a.buf) > 0 {
@@ -358,8 +376,9 @@ func TestUinputAppMatrixWmNormalization(t *testing.T) {
 	}
 }
 
-// TestUinputAppMatrixWmChange: switching apps with an open tx ends it
-// through the single tx-end path; the next key starts clean.
+// TestUinputAppMatrixWmChange: switching apps with an open tx aborts it:
+// the replacement belongs to the previous app and must not be typed into
+// the new one; the next key starts clean.
 func TestUinputAppMatrixWmChange(t *testing.T) {
 	a := newAppModel(t)
 	a.typeKey('a')
@@ -368,8 +387,16 @@ func TestUinputAppMatrixWmChange(t *testing.T) {
 	a.e.uinputLastWm_ = "chrome"
 	a.e.Unlock()
 	a.e.wmClasses = "firefox"
-	a.typeKey('q')
-	pollCommitText(t, a.fe, "á", 500*time.Millisecond)
+	if a.typeKey('q') {
+		t.Errorf("first key in the new app was consumed")
+	}
+	time.Sleep(50 * time.Millisecond)
+	a.fe.mu.Lock()
+	got := a.fe.commitText
+	a.fe.mu.Unlock()
+	if got != "" {
+		t.Errorf("wm-change: %q committed into the new app", got)
+	}
 	a.e.Lock()
 	del := a.e.uinputDeleting_
 	a.e.Unlock()

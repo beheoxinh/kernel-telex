@@ -51,12 +51,26 @@ char * x11GetStringProperty(Display *display, Window window, char * propName) {
     unsigned char * uc = NULL;
 
     filterAtom = XInternAtom(display, propName, True);
+    if (filterAtom == None) {
+        return NULL;
+    }
     status = XGetWindowProperty(display, window, filterAtom, 0, MaxPropertyLen, False, AnyPropertyType,
         &actualType, &actualFormat, &len, &bytesAfter, &uc);
-    if (status == Success) {
-        return uchar2char(uc, len);
+    if (status != Success || uc == NULL) {
+        return NULL;
     }
-    return NULL;
+    if (actualFormat != 8 || len == 0) {
+        XFree(uc);
+        return NULL;
+    }
+    // Copy into malloc'd memory: the caller frees it with free().
+    char *out = malloc(len + 1);
+    if (out != NULL) {
+        memcpy(out, uchar2char(uc, len), len);
+        out[len] = 0;
+    }
+    XFree(uc);
+    return out;
 }
 
 char * x11GetFocusWindowClassByProp(Display *display, char * propName) {
@@ -68,14 +82,17 @@ char * x11GetFocusWindowClassByProp(Display *display, char * propName) {
         if (strClass != NULL && strstr(strClass, "FocusProxy") == NULL) {
             return strClass;
         }
-        Window * childrenWindows;
-        Window parentWindow, rootWindow;
+        free(strClass);
+        Window * childrenWindows = NULL;
+        Window parentWindow = 0, rootWindow = 0;
         unsigned int nChild = 0;
-        XQueryTree(display, w, &rootWindow, &parentWindow, &childrenWindows, &nChild);
-        if (childrenWindows != NULL) {
-            //XFree(childrenWindows);
+        if (!XQueryTree(display, w, &rootWindow, &parentWindow, &childrenWindows, &nChild)) {
+            break;
         }
-        if (rootWindow == parentWindow) {
+        if (childrenWindows != NULL) {
+            XFree(childrenWindows);
+        }
+        if (rootWindow == parentWindow || parentWindow == 0) {
             break;
         }
         w = parentWindow;
@@ -113,7 +130,7 @@ long x11GetFocusPID() {
         unsigned char *data = NULL;
         int status = XGetWindowProperty(dpy, w, netWMPid, 0, 1, False, XA_CARDINAL,
                                         &actualType, &actualFormat, &nitems, &bytesAfter, &data);
-        if (status == Success && data != NULL) {
+        if (status == Success && data != NULL && nitems > 0 && actualFormat == 32) {
             long pid = (long)((unsigned long*)data)[0];
             XFree(data);
             XCloseDisplay(dpy);
@@ -121,14 +138,16 @@ long x11GetFocusPID() {
         }
         if (data != NULL) XFree(data);
 
-        Window rootWindow, parentWindow;
-        Window * childrenWindows;
+        Window rootWindow = 0, parentWindow = 0;
+        Window * childrenWindows = NULL;
         unsigned int nChild = 0;
-        XQueryTree(dpy, w, &rootWindow, &parentWindow, &childrenWindows, &nChild);
+        if (!XQueryTree(dpy, w, &rootWindow, &parentWindow, &childrenWindows, &nChild)) {
+            break;
+        }
         if (childrenWindows != NULL) {
             XFree(childrenWindows);
         }
-        if (rootWindow == parentWindow) {
+        if (rootWindow == parentWindow || parentWindow == 0) {
             break;
         }
         w = parentWindow;

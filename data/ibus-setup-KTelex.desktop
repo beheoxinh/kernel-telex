@@ -1,7 +1,9 @@
 [Desktop Entry]
-Name=IBus-KTelex Setup
+Name=KTelex
+Comment=Cài đặt bộ gõ tiếng Việt KTelex
+Keywords=vietnamese;telex;ibus;input;
+Categories=Settings;
 Type=Application
 Exec=/usr/libexec/ibus-engine-ktelex --gui
 Icon=/usr/share/ktelex/icons/vi.svg
-NoDisplay=true
 StartupNotify=true

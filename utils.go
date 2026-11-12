@@ -35,7 +35,7 @@ const (
 	VnCaseNoChange
 )
 const (
-	HomePage = "https://github.com/BambooEngine/ibus-bamboo"
+	HomePage = "https://github.com/beheoxinh/kernel-telex"
 
 	DataDir          = "/usr/share/ktelex"
 	DictVietnameseCm = "data/vietnamese.cm.dict"

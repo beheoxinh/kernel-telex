@@ -28,6 +28,7 @@ func dstApp(t *testing.T, wm string, honour bool) *appModel {
 		uinputDeleteSurroundingHook = saved
 		uinputEchoMu.Lock()
 		delete(uinputDstBroken, echoProfileKey(wm))
+		delete(uinputDstLag, echoProfileKey(wm))
 		uinputEchoMu.Unlock()
 	})
 	a.report()
@@ -68,21 +69,76 @@ func TestDstReplaceWithoutKeys(t *testing.T) {
 }
 
 // Text before the caret that does not end with the syllable (the app has
-// not reported the last key yet) must not be trusted.
-func TestDstStaleSurroundingFallsBack(t *testing.T) {
+// not reported the last key yet: fast typing) is never trusted. The engine
+// waits for the app's update, buffering keys typed meanwhile, then replaces
+// through surrounding text and replays them in order.
+func TestDstStaleSurroundingWaitsForUpdate(t *testing.T) {
 	calls := 0
 	a := dstApp(t, "google-chrome:Google-chrome", true)
 	inner := uinputDeleteSurroundingHook
 	uinputDeleteSurroundingHook = func(n int) { calls++; inner(n) }
 	a.typeKey('a')
 	a.report()
-	a.typeKey('n') // no report: the field state is stale
+	a.typeKey('n') // no report yet: the field state is stale
 	a.typeKey('s')
 	if calls != 0 {
 		t.Fatalf("DeleteSurroundingText used on stale text")
 	}
+	if !a.typeKey('h') {
+		t.Fatalf("key typed while waiting was not buffered")
+	}
+	a.report() // the app catches up: "an"
+	if calls != 1 {
+		t.Fatalf("DeleteSurroundingText calls=%d, want 1", calls)
+	}
+	if del, _ := txOpen(a.e); del {
+		t.Fatalf("key transaction opened")
+	}
+	if got := a.text(); got != "ánh" {
+		t.Fatalf("app=%q want %q", got, "ánh")
+	}
+	if got := a.e.uinputPreeditString(); got != "ánh" {
+		t.Fatalf("syllable=%q want %q (buffered key replayed)", got, "ánh")
+	}
+	a.fe.mu.Lock()
+	fw := a.fe.forwardKeyEvent
+	a.fe.mu.Unlock()
+	if fw[0] != 'h' {
+		t.Fatalf("buffered 'h' not forwarded after the replace: %v", fw)
+	}
+}
+
+// No update within kUinputDstAwait: Backspace transaction; an app that keeps
+// lagging is not waited for any more.
+func TestDstStaleSurroundingTimesOut(t *testing.T) {
+	const wm = "dst-laggy-app:Dst-laggy-app"
+	for i := 0; i < kUinputDstLagMax; i++ {
+		a := dstApp(t, wm, true)
+		a.typeKey('a')
+		a.report()
+		a.typeKey('n')
+		a.typeKey('s')
+		if del, _ := txOpen(a.e); del {
+			t.Fatalf("round %d: Backspace before waiting for the app", i)
+		}
+		time.Sleep(kUinputDstAwait + 30*time.Millisecond)
+		a.e.Lock()
+		del, exp := a.e.uinputDeleting_, a.e.uinputExpectingBs_
+		a.e.Unlock()
+		if !del || exp != 2 {
+			t.Fatalf("round %d: tx open=%v expect=%d after timeout, want Backspace x2", i, del, exp)
+		}
+		a.e.Lock()
+		a.e.uinputResetTxStateLocked()
+		a.e.Unlock()
+	}
+	a := dstApp(t, wm, true)
+	a.typeKey('a')
+	a.report()
+	a.typeKey('n')
+	a.typeKey('s')
 	if del, _ := txOpen(a.e); !del {
-		t.Fatalf("no key transaction on stale surrounding text")
+		t.Fatalf("laggy app still waited for surrounding text")
 	}
 }
 
@@ -135,5 +191,34 @@ func TestDstNotUsedWithSelection(t *testing.T) {
 	a.typeKey('d')
 	if calls != 0 {
 		t.Fatalf("DeleteSurroundingText used with a selection")
+	}
+}
+
+// Burst typing: every surrounding-text report lags one key behind. The
+// result must match slow typing and no Backspace may be injected.
+func TestDstBurstWithLaggingReports(t *testing.T) {
+	for word, want := range map[string]string{
+		"ans": "án", "tieengs": "tiếng", "nguowif": "người", "ddaays": "đấy", "vieetj": "việt",
+	} {
+		a := dstApp(t, "google-chrome:Google-chrome", true)
+		forwarded := 0
+		for _, k := range word {
+			prev := string(a.buf)
+			if !a.typeKey(uint32(k)) {
+				forwarded++
+			}
+			n := uint32(len([]rune(prev)))
+			a.e.uinputOnSurroundingText(prev, n, n) // one key late
+		}
+		a.report()
+		if del, _ := txOpen(a.e); del {
+			t.Fatalf("%q: Backspace transaction opened", word)
+		}
+		if got := a.e.uinputPreeditString(); got != want {
+			t.Errorf("%q: syllable=%q want %q", word, got, want)
+		}
+		if a.e.uinputAwait_ != nil {
+			t.Errorf("%q: still waiting for surrounding text", word)
+		}
 	}
 }
