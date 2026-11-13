@@ -32,6 +32,12 @@ func TestUinputRestoreEnglishAtWordBreak(t *testing.T) {
 		"anw ":     "ăn ",
 		"hocj ":    "học ",
 		"bachs ":   "bách ",
+		// Telex undo inside the word: what is shown is what the user wanted.
+		"Manaagerr ": "Manager ",
+		"mananger ":  "mananger ",
+		"Paperr ":    "Paper ",
+		"seerver ":   "seerver ", // no undo: ê then English restore
+		"Appp ":      "Appp ",
 	} {
 		a := newAppModel(t)
 		a.drivePerfectEcho(word)

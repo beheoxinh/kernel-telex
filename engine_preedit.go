@@ -223,9 +223,12 @@ func vnSyllableComplete(word string) bool {
 // shouldRestoreEnglish decides, at a word break, whether the word typed is
 // English and its raw keys go back in place of the Vietnamese transform:
 // "coffee" -> "coffee" not "cofê", "text" not "tẽt", "loop" not "lôp".
-// A word without any Vietnamese letter whose last key undid the one before
-// it ("ass" -> "as", "off" -> "of") is the Telex way of typing that literal
-// text and is kept.
+// A word that shows no Vietnamese letter got there through a Telex undo (a
+// doubled key cancels a mark: "ass" -> "as") and is kept as shown:
+//   - Kernel mode composes every key with Telex rules, so any undo counts,
+//     also inside the word ("Manaagerr" shows and stays "Manager");
+//   - Preedit/Surround switch to literal keys after an undo ("coffee" shows
+//     "cofee"), so only an undo by the last key is kept there.
 func (e *Engine) shouldRestoreEnglish() bool {
 	if e.config.IBflags&config.IBautoNonVnRestore == 0 {
 		return false
@@ -241,7 +244,9 @@ func (e *Engine) shouldRestoreEnglish() bool {
 	if bamboo.HasAnyVietnameseRune(vn) {
 		return true
 	}
-	// Telex idiom: the last key undid the one before it ("ass" -> "as").
+	if e.checkInputMode(config.UinputIM) {
+		return false
+	}
 	n := len(en)
 	return n < 2 || en[n-1] != en[n-2] || vn != string(en[:n-1])
 }
